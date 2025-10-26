@@ -1,0 +1,39 @@
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: #f4f7f9;
+    color: #333;
+    margin: 0;
+}
+.container { max-width: 1200px; margin: 20px auto; background: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+h1, h2 { color: #2c3e50; border-bottom: 2px solid #e0e0e0; padding-bottom: 10px; }
+
+/* Drag & Drop i formularz uploadu */
+.drop-zone { border: 2px dashed #ccc; border-radius: 8px; padding: 20px; text-align: center; margin-bottom: 20px; transition: background-color 0.2s ease; }
+.drop-zone.drag-over { background-color: #e8f0fe; border-color: #3498db; }
+.upload-form { display: flex; gap: 10px; align-items: center; justify-content: center; }
+.upload-form input[type="file"] { display: none; }
+.file-label { display: inline-block; padding: 10px 15px; background-color: #7f8c8d; color: white; border-radius: 5px; cursor: pointer; }
+.preview-image { max-width: 100%; max-height: 200px; margin-top: 15px; border: 1px solid #ddd; }
+
+.status { margin: 15px 0; font-weight: bold; color: #e67e22; min-height: 24px; }
+.export-section, .filter-section { background: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0; display: flex; gap: 10px; align-items: center; }
+.filter-input { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 5px; }
+
+/* Tabela */
+.table-container { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+th, td { border: 1px solid #ddd; padding: 12px; text-align: left; vertical-align: middle; }
+th { background-color: #f2f2f2; cursor: pointer; user-select: none; }
+th:hover { background-color: #e8e8e8; }
+td input { width: 95%; padding: 8px; border: 1px solid #3498db; border-radius: 4px; }
+
+/* Przyciski */
+button { padding: 10px 15px; color: white; border: none; border-radius: 5px; cursor: pointer; transition: background-color 0.2s; }
+button:disabled { background-color: #bdc3c7; cursor: not-allowed; }
+.upload-form button { background-color: #3498db; }
+.export-section button { background-color: #27ae60; }
+td button { margin-right: 5px; font-size: 12px; padding: 6px 10px; }
+.btn-edit { background-color: #f39c12; }
+.btn-delete { background-color: #e74c3c; }
+.btn-save { background-color: #2ecc71; }
+.btn-cancel { background-color: #95a5a6; }

@@ -1,0 +1,21 @@
+# Dependencies
+/node_modules
+
+# Production
+/build
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Environment variables
+.env
+
+# Sensitive files
+gcp-credentials.json
+private_key.pem
+user_certs/
