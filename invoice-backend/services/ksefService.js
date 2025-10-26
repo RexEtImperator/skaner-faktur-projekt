@@ -133,24 +133,31 @@ class KsefService {
         await this.#ensureSession();
         
         const queryXml = js2xml({
-            // ... (tutaj należy zbudować pełny, poprawny obiekt JSON, który zostanie przekonwertowany na XML zapytania)
-            // Przykład uproszczony:
-            QueryCriteria: {
-                SubjectType: "subject2",
-                Type: "incremental",
-                AcquisitionTimestampThresholdFrom: `${startDate}T00:00:00Z`
+            _declaration: { _attributes: { version: '1.0', encoding: 'utf-8' } },
+            QueryInvoiceRequest: {
+                _attributes: {
+                    xmlns: "http://ksef.mf.gov.pl/schema/gt/sbs/2021/10/01/0001",
+                    "xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance",
+                    "xmlns:ns2": "http://ksef.mf.gov.pl/schema/gt/dfl/2021/10/01/0001"
+                },
+                QueryCriteria: {
+                    SubjectType: "subject2",
+                    Type: "incremental",
+                    AcquisitionTimestampThresholdFrom: `${startDate}T00:00:00Z`
+                }
             }
         }, { compact: true, spaces: 4 });
 
         const response = await this.#executeRequest(() => 
             this.api.post('/online/Query/Invoice/Sync', queryXml, {
                 headers: { 
-                    'Content-Type': 'application/octet-stream',
+                    'Content-Type': 'application/xml', // Poprawiony Content-Type
                     'SessionToken': this.sessionToken
                 }
             })
         );
-        return xml2js(response.data, { compact: true });
+        // KSeF zwraca dane w formacie XML, więc od razu je parsujemy
+        return xml2js(response.data, { compact: true, alwaysArray: true });
     }
 
     /**

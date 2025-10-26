@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 
 import DashboardPage from './pages/DashboardPage';
@@ -58,8 +58,7 @@ function App() {
     return (
         // AuthProvider udostępnia kontekst autoryzacji wszystkim komponentom potomnym.
         <AuthProvider>
-            <Router>
-                <Routes>
+            <Routes>
                     {/* Trasy publiczne (dostępne dla niezalogowanych) */}
                     <Route
                         path="/login"
@@ -91,7 +90,6 @@ function App() {
                     {/* Przekierowanie dla każdej innej, nieznanej ścieżki */}
                     <Route path="*" element={<Navigate to="/" replace />} />
                 </Routes>
-            </Router>
         </AuthProvider>
     );
 }

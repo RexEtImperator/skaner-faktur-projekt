@@ -1,4 +1,3 @@
-// invoice-backend/imap-worker.js
 const mysql = require('mysql2/promise');
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');

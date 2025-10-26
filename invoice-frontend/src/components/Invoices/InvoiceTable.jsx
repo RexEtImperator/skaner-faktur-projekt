@@ -1,15 +1,37 @@
 import React, { useState, useMemo } from 'react';
 import api from '../../api/axiosConfig';
 
-/**
- * Komponent wyświetlający tabelę z fakturami.
- * Obsługuje edycję w miejscu, usuwanie i sortowanie danych.
- *
- * @param {object} props
- * @param {Array} props.invoices - Tablica obiektów z danymi faktur.
- * @param {Array} props.categories - Lista dostępnych kategorii (do wyboru podczas edycji).
- * @param {Function} props.onDataChange - Funkcja zwrotna wywoływana po udanej edycji lub usunięciu.
- */
+// Komponent do wyświetlania szczegółów pozycji faktury
+const InvoiceItemsTable = ({ items }) => (
+    <div className="invoice-items-container">
+        <h4>Pozycje na fakturze:</h4>
+        <table className="invoice-items-table">
+            <thead>
+                <tr>
+                    <th>Opis</th>
+                    <th>Cena jedn. netto</th>
+                    <th>Stawka VAT</th>
+                    <th>Wartość netto</th>
+                    <th>Kwota VAT</th>
+                    <th>Wartość brutto</th>
+                </tr>
+            </thead>
+            <tbody>
+                {items.map((item, index) => (
+                    <tr key={item.id || index}>
+                        <td>{item.description}</td>
+                        <td>{parseFloat(item.unit_price_net).toFixed(2)} zł</td>
+                        <td>{item.vat_rate}</td>
+                        <td>{parseFloat(item.total_net_amount).toFixed(2)} zł</td>
+                        <td>{parseFloat(item.total_vat_amount).toFixed(2)} zł</td>
+                        <td>{parseFloat(item.total_gross_amount).toFixed(2)} zł</td>
+                    </tr>
+                ))}
+            </tbody>
+        </table>
+    </div>
+);
+
 const InvoiceTable = ({ invoices, categories, onDataChange }) => {
     const [editingId, setEditingId] = useState(null);
     const [expandedId, setExpandedId] = useState(null); // Stan do śledzenia rozwiniętego wiersza
@@ -21,21 +43,16 @@ const InvoiceTable = ({ invoices, categories, onDataChange }) => {
         let sortableInvoices = [...invoices];
         if (sortConfig.key) {
             sortableInvoices.sort((a, b) => {
-                if (a[sortConfig.key] < b[sortConfig.key]) {
-                    return sortConfig.direction === 'ascending' ? -1 : 1;
-                }
-                if (a[sortConfig.key] > b[sortConfig.key]) {
-                    return sortConfig.direction === 'ascending' ? 1 : -1;
-                }
+                const valA = a[sortConfig.key] || '';
+                const valB = b[sortConfig.key] || '';
+                if (valA < valB) return sortConfig.direction === 'ascending' ? -1 : 1;
+                if (valA > valB) return sortConfig.direction === 'ascending' ? 1 : -1;
                 return 0;
             });
         }
         return sortableInvoices;
     }, [invoices, sortConfig]);
 
-    /**
-     * Zmienia konfigurację sortowania po kliknięciu w nagłówek kolumny.
-     */
     const requestSort = (key) => {
         let direction = 'ascending';
         if (sortConfig.key === key && sortConfig.direction === 'ascending') {
@@ -44,51 +61,33 @@ const InvoiceTable = ({ invoices, categories, onDataChange }) => {
         setSortConfig({ key, direction });
     };
 
-    /**
-
-     * Zwraca strzałkę wskazującą kierunek sortowania dla danego nagłówka.
-     */
     const getSortArrow = (key) => {
-        if (sortConfig.key !== key) return '';
+        if (sortConfig.key !== key) return '  Arrows';
         return sortConfig.direction === 'ascending' ? ' ▲' : ' ▼';
     };
 
-    /**
-     * Inicjuje tryb edycji dla wybranego wiersza.
-     */
     const handleStartEdit = (invoice) => {
         setEditingId(invoice.id);
-        // Formatowanie daty dla input[type=date] i zapewnienie, że puste daty nie powodują błędu
         const formattedIssueDate = invoice.issue_date ? new Date(invoice.issue_date).toISOString().split('T')[0] : '';
-        const formattedDueDate = invoice.payment_due_date ? new Date(invoice.payment_due_date).toISOString().split('T')[0] : '';
-        setEditFormData({ ...invoice, issue_date: formattedIssueDate, payment_due_date: formattedDueDate });
-        setError(''); // Wyczyść błędy przy rozpoczęciu nowej edycji
+        setEditFormData({ ...invoice, issue_date: formattedIssueDate });
+        setError('');
     };
 
-    /**
-     * Anuluje tryb edycji.
-     */
     const handleCancelEdit = () => {
         setEditingId(null);
         setError('');
     };
 
-    /**
-     * Aktualizuje stan formularza edycji przy każdej zmianie w polu input/select.
-     */
     const handleEditFormChange = (e) => {
         const { name, value } = e.target;
         setEditFormData({ ...editFormData, [name]: value });
     };
 
-    /**
-     * Wysyła zaktualizowane dane faktury do backendu.
-     */
     const handleUpdateInvoice = async (id) => {
         try {
-            await api.put(`/invoices/${id}`, editFormData);
+            await api.put(`/api/invoices/${id}`, editFormData);
             setEditingId(null);
-            onDataChange(); // Odśwież dane na dashboardzie
+            onDataChange();
         } catch (err) {
             const errorMessage = err.response?.data?.message || "Nie udało się zaktualizować faktury.";
             setError(errorMessage);
@@ -99,27 +98,21 @@ const InvoiceTable = ({ invoices, categories, onDataChange }) => {
      * Wysyła żądanie usunięcia faktury do backendu.
      */
     const handleDeleteInvoice = async (id) => {
-        if (window.confirm('Czy na pewno chcesz trwale usunąć tę fakturę? Tej operacji nie można cofnąć.')) {
+        if (window.confirm('Czy na pewno chcesz trwale usunąć tę fakturę?')) {
             try {
-                await api.delete(`/invoices/${id}`);
-                onDataChange(); // Odśwież dane na dashboardzie
+                await api.delete(`/api/invoices/${id}`);
+                onDataChange();
             } catch (err) {
                 alert(err.response?.data?.message || "Nie udało się usunąć faktury.");
             }
         }
     };
 
-    /**
-     * Formatuje datę do czytelnego formatu (DD.MM.RRRR).
-     */
     const formatDate = (dateString) => {
         if (!dateString) return '—';
-        const date = new Date(dateString);
-        // Dodajemy timeZone UTC, aby uniknąć problemu z przesunięciem daty o jeden dzień
-        return date.toLocaleDateString('pl-PL', { timeZone: 'UTC' });
+        return new Date(dateString).toLocaleDateString('pl-PL', { timeZone: 'UTC' });
     };
 
-    // Przełącza widoczność szczegółów faktury
     const toggleExpand = (id) => {
         setExpandedId(expandedId === id ? null : id);
     };
@@ -134,9 +127,6 @@ const InvoiceTable = ({ invoices, categories, onDataChange }) => {
                         <th onClick={() => requestSort('invoice_number')}>Nr faktury{getSortArrow('invoice_number')}</th>
                         <th onClick={() => requestSort('issue_date')}>Data wystawienia{getSortArrow('issue_date')}</th>
                         <th onClick={() => requestSort('seller_nip')}>NIP Sprzedawcy{getSortArrow('seller_nip')}</th>
-                        <th onClick={() => requestSort('buyer_nip')}>NIP Nabywcy{getSortArrow('buyer_nip')}</th>
-                        <th onClick={() => requestSort('category_name')}>Kategoria{getSortArrow('category_name')}</th>
-                        <th onClick={() => requestSort('payment_status')}>Status{getSortArrow('payment_status')}</th>
                         <th onClick={() => requestSort('total_net_amount')}>Suma Netto{getSortArrow('total_net_amount')}</th>
                         <th onClick={() => requestSort('total_vat_amount')}>Suma VAT{getSortArrow('total_vat_amount')}</th>
                         <th onClick={() => requestSort('total_gross_amount')}>Suma Brutto{getSortArrow('total_gross_amount')}</th>
@@ -173,9 +163,9 @@ const InvoiceTable = ({ invoices, categories, onDataChange }) => {
                                         <td>{invoice.invoice_number}</td>
                                         <td>{formatDate(invoice.issue_date)}</td>
                                         <td>{invoice.seller_nip || '—'}</td>
-                                        <td>{invoice.total_net_amount?.toFixed(2)} zł</td>
-                                        <td>{invoice.total_vat_amount?.toFixed(2)} zł</td>
-                                        <td>{invoice.total_gross_amount?.toFixed(2)} zł</td>
+                                        <td>{invoice.total_net_amount ? `${parseFloat(invoice.total_net_amount).toFixed(2)} zł` : '—'}</td>
+                                        <td>{invoice.total_vat_amount ? `${parseFloat(invoice.total_vat_amount).toFixed(2)} zł` : '—'}</td>
+                                        <td>{invoice.total_gross_amount ? `${parseFloat(invoice.total_gross_amount).toFixed(2)} zł` : '—'}</td>
                                         <td>
                                             <button className="btn-edit" onClick={() => handleStartEdit(invoice)}>Edytuj</button>
                                             <button className="btn-delete" onClick={() => handleDeleteInvoice(invoice.id)}>Usuń</button>

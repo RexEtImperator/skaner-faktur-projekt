@@ -72,13 +72,26 @@ export const AuthProvider = ({ children }) => {
         navigate('/login');
     };
 
+    // Funkcja rejestracji
+    const register = async (email, password) => {
+        try {
+            // Wywołaj endpoint rejestracji na backendzie
+            await api.post('/register', { email, password });
+        } catch (error) {
+            // Rzuć błąd dalej, aby komponent RegisterPage mógł go obsłużyć
+            const errorMessage = error.response?.data?.message || 'Wystąpił nieznany błąd podczas rejestracji.';
+            throw new Error(errorMessage);
+        }
+    };
+    
     // 3. Definiujemy wartość, którą kontekst będzie udostępniał potomnym komponentom
     const value = {
         user,
         isLoading,
-        isAuthenticated: !!user, // Prosty getter, zwraca true jeśli user istnieje, false w przeciwnym razie
+        isAuthenticated: !!user,
         login,
-        logout
+        logout,
+        register // Udostępnij funkcję rejestracji
     };
 
     // Zwracamy Providera, który "opakowuje" resztę aplikacji (children)

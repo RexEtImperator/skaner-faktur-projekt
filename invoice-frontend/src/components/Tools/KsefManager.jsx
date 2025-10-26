@@ -11,12 +11,11 @@ const KsefManager = () => {
     const [settings, setSettings] = useState({ ksef_nip: '', ksef_token: '' });
     // Stan do przechowywania listy faktur pobranych z KSeF
     const [ksefInvoices, setKsefInvoices] = useState([]);
-    // Stan do śledzenia zaznaczonych faktur do importu
-    const [selectedInvoices, setSelectedInvoices] = useState(new Set());
     // Stan do zarządzania datą początkową dla pobierania faktur
     const [startDate, setStartDate] = useState(new Date().toISOString().split('T')[0]);
     // Stan do wyświetlania komunikatów o statusie operacji
     const [status, setStatus] = useState({ message: '', type: '' });
+    const [isLoading, setIsLoading] = useState(false);
 
     // Efekt do pobrania aktualnych ustawień przy pierwszym renderowaniu komponentu
     useEffect(() => {
@@ -81,49 +80,38 @@ const KsefManager = () => {
      * Pobiera listę nagłówków faktur z KSeF od podanej daty.
      */
     const handleFetchInvoices = async () => {
+        setIsLoading(true);
         setStatus({ message: 'Pobieranie listy faktur z KSeF...', type: 'info' });
         setKsefInvoices([]); // Wyczyść poprzednie wyniki
         try {
-            const response = await api.post('/ksef/list', { startDate });
-            // Zakładamy, że backend zwraca tablicę faktur
-            setKsefInvoices(response.data || []);
-            setStatus({ message: `Pobrano ${response.data.length || 0} faktur.`, type: 'success' });
+            const response = await api.post('/api/ksef/invoices', { startDate });
+            const invoices = response.data.InvoiceHeaderList[0].invoiceHeader.map(inv => ({
+                ksefReferenceNumber: inv.ksefReferenceNumber[0]._text,
+                invoiceNumber: inv.invoiceNumber[0]._text,
+                sellerName: inv.subjectBy[0].fullName[0]._text,
+                grossAmount: inv.netAmount[0]._text, // Uproszczenie, KSeF nie podaje brutto w nagłówku
+            }));
+            setKsefInvoices(invoices);
+            setStatus({ message: `Pobrano ${invoices.length} faktur.`, type: 'success' });
         } catch (error) {
             setStatus({ message: error.response?.data?.message || 'Nie udało się pobrać faktur.', type: 'error' });
+        } finally {
+            setIsLoading(false);
         }
     };
 
-    /**
-     * Obsługuje zaznaczanie/odznaczanie faktur na liście.
-     */
-    const handleSelectInvoice = (invoiceRef) => {
-        const newSelection = new Set(selectedInvoices);
-        if (newSelection.has(invoiceRef)) {
-            newSelection.delete(invoiceRef);
-        } else {
-            newSelection.add(invoiceRef);
-        }
-        setSelectedInvoices(newSelection);
-    };
-
-    /**
-     * Importuje zaznaczone faktury do systemu.
-     */
-    const handleImportSelected = async () => {
-        if (selectedInvoices.size === 0) {
-            setStatus({ message: 'Najpierw zaznacz faktury do importu.', type: 'error' });
-            return;
-        }
-        setStatus({ message: `Importowanie ${selectedInvoices.size} faktur...`, type: 'info' });
+    const handleImportInvoice = async (ksefReferenceNumber) => {
+        setIsLoading(true);
+        setStatus({ message: `Importowanie faktury ${ksefReferenceNumber}...`, type: 'info' });
         try {
-            const response = await api.post('/ksef/import', {
-                ksefReferenceNumbers: Array.from(selectedInvoices)
-            });
+            const response = await api.post('/api/ksef/import-invoice', { ksefReferenceNumber });
             setStatus({ message: response.data.message, type: 'success' });
-            setSelectedInvoices(new Set()); // Wyczyść zaznaczenie po imporcie
-            // Można by tu dodać odświeżenie głównej listy faktur
+            // Można dodać odświeżenie głównej listy faktur po imporcie
+            // onDataChange(); 
         } catch (error) {
             setStatus({ message: error.response?.data?.message || 'Import nie powiódł się.', type: 'error' });
+        } finally {
+            setIsLoading(false);
         }
     };
 
@@ -160,6 +148,7 @@ const KsefManager = () => {
                 <button onClick={handleFetchInvoices}>Pobierz listę faktur z KSeF</button>
             </div>
 
+            {isLoading && <p>Przetwarzanie...</p>}
             {status.message && (
                 <div className={`status-message ${status.type}`}>
                     {status.message}
@@ -171,32 +160,27 @@ const KsefManager = () => {
                     <table>
                         <thead>
                             <tr>
-                                <th></th>
                                 <th>Numer Faktury</th>
                                 <th>Sprzedawca</th>
-                                <th>Kwota</th>
+                                <th>Kwota (Netto)</th>
+                                <th>Akcje</th>
                             </tr>
                         </thead>
                         <tbody>
                             {ksefInvoices.map(inv => (
                                 <tr key={inv.ksefReferenceNumber}>
-                                    <td>
-                                        <input
-                                            type="checkbox"
-                                            checked={selectedInvoices.has(inv.ksefReferenceNumber)}
-                                            onChange={() => handleSelectInvoice(inv.ksefReferenceNumber)}
-                                        />
-                                    </td>
                                     <td>{inv.invoiceNumber}</td>
                                     <td>{inv.sellerName}</td>
                                     <td>{parseFloat(inv.grossAmount).toFixed(2)} zł</td>
+                                    <td>
+                                        <button onClick={() => handleImportInvoice(inv.ksefReferenceNumber)} disabled={isLoading}>
+                                            Importuj
+                                        </button>
+                                    </td>
                                 </tr>
                             ))}
                         </tbody>
                     </table>
-                    <button onClick={handleImportSelected} disabled={selectedInvoices.size === 0} style={{marginTop: '10px'}}>
-                        Zaimportuj zaznaczone ({selectedInvoices.size})
-                    </button>
                 </div>
             )}
         </div>

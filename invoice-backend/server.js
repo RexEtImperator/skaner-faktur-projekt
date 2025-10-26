@@ -28,7 +28,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'twoj_super_tajny_klucz_jwt_do_zmia
 const dbConfig = {
     host: process.env.DB_HOST || 'localhost',
     user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || '',
+    password: process.env.DB_PASSWORD || 'admin',
     database: process.env.DB_NAME || 'invoice_parser'
 };
 
@@ -342,23 +342,19 @@ app.post('/api/upload', verifyToken, invoiceUpload.single('invoice'), async (req
 /**
  * Endpoint: GET /api/invoices
  * Przeznaczenie: Pobiera wszystkie faktury należące do zalogowanego użytkownika.
+ * Parametry zapytania (query):
+ *  - includeItems (boolean): Jeśli `true`, do każdej faktury zostaną dołączone jej pozycje.
  * Zabezpieczenia: Wymaga ważnego tokenu JWT.
  */
 app.get('/api/invoices', verifyToken, async (req, res) => {
     const { includeItems } = req.query;
-    let connection;
+    let connection; // Zdefiniuj zmienną połączenia na zewnątrz bloku try, aby była dostępna w bloku finally
 
     try {
         // Krok 1: Utwórz połączenie z bazą danych.
         connection = await mysql.createConnection(dbConfig);
         
-        // Krok 2: Przygotuj zapytanie SQL.
-        // - `SELECT i.*, c.name as category_name`: Wybierz wszystkie kolumny z tabeli invoices (alias 'i')
-        //   oraz kolumnę 'name' z tabeli categories (alias 'c'), zmieniając jej nazwę na 'category_name' dla czytelności.
-        // - `FROM invoices i LEFT JOIN categories c ON i.category_id = c.id`: Połącz tabelę faktur z tabelą kategorii.
-        //   Użycie LEFT JOIN zapewnia, że faktury bez przypisanej kategorii również zostaną zwrócone (category_name będzie miało wartość NULL).
-        // - `WHERE i.user_id = ?`: Kluczowe zabezpieczenie - filtruj wyniki tylko dla ID użytkownika pobranego z tokenu.
-        // - `ORDER BY issue_date DESC`: Sortuj wyniki od najnowszej faktury do najstarszej.
+        // Krok 2: Przygotuj zapytanie SQL do pobrania głównych danych faktur.
         const sql = `
             SELECT i.*, c.name AS category_name 
             FROM invoices i 
@@ -366,30 +362,41 @@ app.get('/api/invoices', verifyToken, async (req, res) => {
             WHERE i.user_id = ? 
             ORDER BY i.issue_date DESC
         `;
+
+        // Krok 3: Wykonaj zapytanie, bezpiecznie przekazując ID użytkownika jako parametr.
         const [invoices] = await connection.execute(sql, [req.userId]);
 
+        // Krok 4: Jeśli zażądano pozycji faktur (includeItems=true) i znaleziono jakieś faktury...
         if (includeItems === 'true' && invoices.length > 0) {
+            // ...pobierz wszystkie pozycje dla znalezionych faktur w jednym zapytaniu dla wydajności.
             const invoiceIds = invoices.map(inv => inv.id);
             const itemsSql = `SELECT * FROM invoice_items WHERE invoice_id IN (?)`;
             const [items] = await connection.query(itemsSql, [invoiceIds]);
 
-            // Mapowanie pozycji do odpowiednich faktur
+            // ...a następnie zmapuj pozycje do odpowiednich faktur w bardziej wydajny sposób.
+            const itemsByInvoiceId = items.reduce((acc, item) => {
+                if (!acc[item.invoice_id]) {
+                    acc[item.invoice_id] = [];
+                }
+                acc[item.invoice_id].push(item);
+                return acc;
+            }, {});
+
             invoices.forEach(invoice => {
-                invoice.items = items.filter(item => item.invoice_id === invoice.id);
+                invoice.items = itemsByInvoiceId[invoice.id] || [];
             });
         }
         
+        // Krok 5: Zwróć pobrane dane (wzbogacone o pozycje, jeśli było to wymagane) w formacie JSON.
         res.status(200).json(invoices);
 
     } catch (error) {
-        // Krok 5: W przypadku błędu (np. problem z połączeniem z bazą danych),
-        // zaloguj błąd na serwerze i wyślij generyczny komunikat błędu do klienta.
+        // Krok 6: W przypadku błędu, zaloguj go i wyślij generyczny komunikat do klienta.
         console.error('Błąd podczas pobierania faktur z bazy danych:', error);
         res.status(500).json({ message: 'Wystąpił błąd serwera podczas pobierania faktur.' });
 
     } finally {
-        // Krok 6: Niezależnie od tego, czy operacja się udała, czy nie,
-        // upewnij się, że połączenie z bazą danych zostało zamknięte.
+        // Krok 7: Niezależnie od wyniku, upewnij się, że połączenie z bazą danych zostało zamknięte.
         if (connection) {
             await connection.end();
         }
@@ -411,6 +418,81 @@ app.get('/api/invoices/:id', verifyToken, async (req, res) => {
     } catch (error) {
         console.error('Błąd pobierania faktury:', error);
         res.status(500).json({ message: 'Błąd serwera.' });
+    }
+});
+
+// Endpoint do aktualizacji faktury
+app.put('/api/invoices/:id', verifyToken, async (req, res) => {
+    const { id } = req.params;
+    const { 
+        invoice_number, 
+        issue_date, 
+        seller_nip, 
+        buyer_nip, 
+        total_net_amount, 
+        total_vat_amount, 
+        total_gross_amount 
+    } = req.body;
+
+    // Prosta walidacja
+    if (!invoice_number || !issue_date || !total_gross_amount) {
+        return res.status(400).json({ message: 'Brak wymaganych danych (numer faktury, data, kwota brutto).' });
+    }
+
+    // Obliczanie month_year na podstawie nowej daty
+    const date = new Date(issue_date);
+    const month_year = `${(date.getMonth() + 1).toString().padStart(2, '0')}/${date.getFullYear()}`;
+
+    try {
+        const connection = await mysql.createConnection(dbConfig);
+        const sql = `
+            UPDATE invoices 
+            SET invoice_number = ?, issue_date = ?, seller_nip = ?, buyer_nip = ?, 
+                total_net_amount = ?, total_vat_amount = ?, total_gross_amount = ?, month_year = ?
+            WHERE id = ? AND user_id = ?
+        `;
+        const [result] = await connection.execute(sql, [
+            invoice_number,
+            issue_date,
+            seller_nip,
+            buyer_nip,
+            total_net_amount,
+            total_vat_amount,
+            total_gross_amount,
+            month_year,
+            id,
+            req.userId
+        ]);
+        await connection.end();
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: 'Nie znaleziono faktury o podanym ID lub brak uprawnień.' });
+        }
+
+        res.json({ message: 'Dane faktury zaktualizowane!' });
+    } catch (error) {
+        console.error('Błąd aktualizacji faktury:', error);
+        res.status(500).send('Wystąpił błąd serwera.');
+    }
+});
+
+// Endpoint do usuwania faktury
+app.delete('/api/invoices/:id', verifyToken, async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const connection = await mysql.createConnection(dbConfig);
+        const [result] = await connection.execute('DELETE FROM invoices WHERE id = ? AND user_id = ?', [id, req.userId]);
+        await connection.end();
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: 'Nie znaleziono faktury o podanym ID lub brak uprawnień.' });
+        }
+
+        res.status(200).json({ message: 'Faktura została usunięta.' });
+    } catch (error) {
+        console.error('Błąd usuwania faktury:', error);
+        res.status(500).send('Wystąpił błąd serwera.');
     }
 });
 
@@ -652,66 +734,105 @@ app.post('/api/ksef/test-session', verifyToken, async (req, res) => {
     }
 });
 
-// Endpoint do aktualizacji faktury
-app.put('/api/invoices/:id', verifyToken, async (req, res) => {
-    const { id } = req.params;
-    const { invoice_number, issue_date, seller_nip, buyer_nip, gross_amount } = req.body;
+// --- Endpointy do integracji z KSeF ---
 
-    // Prosta walidacja
-    if (!invoice_number || !issue_date || !gross_amount) {
-        return res.status(400).json({ message: 'Brak wymaganych danych.' });
+/**
+ * Endpoint: POST /api/ksef/invoices
+ * Przeznaczenie: Pobiera listę nagłówków faktur z KSeF dla danego okresu.
+ * Oczekuje w body: { "startDate": "YYYY-MM-DD" }
+ */
+app.post('/api/ksef/invoices', verifyToken, async (req, res) => {
+    const { startDate } = req.body;
+    if (!startDate) {
+        return res.status(400).json({ message: 'Data początkowa jest wymagana.' });
     }
-
-    // Obliczanie month_year na podstawie nowej daty
-    const date = new Date(issue_date);
-    const month_year = `${(date.getMonth() + 1).toString().padStart(2, '0')}/${date.getFullYear()}`;
 
     try {
         const connection = await mysql.createConnection(dbConfig);
-        const sql = `
-            UPDATE invoices 
-            SET invoice_number = ?, issue_date = ?, seller_nip = ?, buyer_nip = ?, gross_amount = ?, month_year = ?
-            WHERE id = ?
-        `;
-        const [result] = await connection.execute(sql, [
-            invoice_number,
-            issue_date,
-            seller_nip,
-            buyer_nip,
-            gross_amount,
-            month_year,
-            id
-        ]);
+        const [rows] = await connection.execute('SELECT ksef_nip, ksef_token_encrypted, cert_storage_path FROM users WHERE id = ?', [req.userId]);
         await connection.end();
 
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ message: 'Nie znaleziono faktury o podanym ID.' });
+        const user = rows[0];
+        if (!user || !user.ksef_nip || !user.ksef_token_encrypted || !user.cert_storage_path) {
+            return res.status(400).json({ message: 'Niekompletne dane do połączenia z KSeF.' });
         }
+        
+        const decryptedToken = decrypt(user.ksef_token_encrypted);
+        const ksefService = new KsefService(user.ksef_nip, decryptedToken, user.cert_storage_path);
+        
+        const invoiceHeaders = await ksefService.getInvoices(startDate);
+        res.json(invoiceHeaders);
 
-        res.json({ message: 'Dane faktury zaktualizowane!' });
     } catch (error) {
-        console.error('Błąd aktualizacji faktury:', error);
-        res.status(500).send('Wystąpił błąd serwera.');
+        if (error instanceof KsefError) {
+            return res.status(error.statusCode).json({ message: error.message });
+        }
+        console.error('Błąd pobierania faktur z KSeF:', error);
+        res.status(500).json({ message: 'Wewnętrzny błąd serwera podczas komunikacji z KSeF.' });
     }
 });
 
-// Endpoint do usuwania faktury
-app.delete('/api/invoices/:id', verifyToken, async (req, res) => {
-    const { id } = req.params;
+/**
+ * Endpoint: POST /api/ksef/import-invoice
+ * Przeznaczenie: Importuje pojedynczą fakturę z KSeF do bazy danych.
+ * Oczekuje w body: { "ksefReferenceNumber": "..." }
+ */
+app.post('/api/ksef/import-invoice', verifyToken, async (req, res) => {
+    const { ksefReferenceNumber } = req.body;
+    if (!ksefReferenceNumber) {
+        return res.status(400).json({ message: 'Numer referencyjny KSeF jest wymagany.' });
+    }
 
+    let connection;
     try {
-        const connection = await mysql.createConnection(dbConfig);
-        const [result] = await connection.execute('DELETE FROM invoices WHERE id = ?', [id]);
-        await connection.end();
+        connection = await mysql.createConnection(dbConfig);
+        const [userRows] = await connection.execute('SELECT ksef_nip, ksef_token_encrypted, cert_storage_path FROM users WHERE id = ?', [req.userId]);
+        const user = userRows[0];
 
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ message: 'Nie znaleziono faktury o podanym ID.' });
+        if (!user || !user.ksef_nip || !user.ksef_token_encrypted || !user.cert_storage_path) {
+            return res.status(400).json({ message: 'Niekompletne dane do połączenia z KSeF.' });
         }
 
+        const decryptedToken = decrypt(user.ksef_token_encrypted);
+        const ksefService = new KsefService(user.ksef_nip, decryptedToken, user.cert_storage_path);
+
+        // Pobierz pełną fakturę i zmapuj ją na model bazy danych
+        const fullInvoiceXml = await ksefService.getFullInvoice(ksefReferenceNumber);
+        const { invoiceData, itemsData } = mapKsefFaVatToDbModel(fullInvoiceXml);
+
+        // Zapisz fakturę i jej pozycje w transakcji
+        await connection.beginTransaction();
+        const invoiceSql = 'INSERT INTO invoices (user_id, invoice_number, issue_date, seller_nip, buyer_nip, total_net_amount, total_vat_amount, total_gross_amount, month_year) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)';
+        const [invoiceResult] = await connection.execute(invoiceSql, [
+            req.userId, invoiceData.invoice_number, invoiceData.issue_date, invoiceData.seller_nip, 
+            invoiceData.buyer_nip, invoiceData.total_net_amount, invoiceData.total_vat_amount, 
+            invoiceData.total_gross_amount, invoiceData.month_year
+        ]);
+        const invoiceId = invoiceResult.insertId;
+
+        if (itemsData && itemsData.length > 0) {
+            const itemsSql = 'INSERT INTO invoice_items (invoice_id, description, quantity, unit_price_net, vat_rate, total_net_amount, total_vat_amount, total_gross_amount) VALUES ?';
+            const itemsValues = itemsData.map(item => [
+                invoiceId, item.description, item.quantity, item.unit_price_net, item.vat_rate, 
+                item.total_net_amount, item.total_vat_amount, item.total_gross_amount
+            ]);
+            await connection.query(itemsSql, [itemsValues]);
+        }
+
+        await connection.commit();
+
         res.status(200).json({ message: 'Faktura została usunięta.' });
+        res.status(201).json({ message: `Faktura ${invoiceData.invoice_number} została pomyślnie zaimportowana.` });
+
     } catch (error) {
-        console.error('Błąd usuwania faktury:', error);
-        res.status(500).send('Wystąpił błąd serwera.');
+        if (connection) await connection.rollback();
+        if (error instanceof KsefError) {
+            return res.status(error.statusCode).json({ message: error.message });
+        }
+        console.error('Błąd importu faktury z KSeF:', error);
+        res.status(500).json({ message: 'Wewnętrzny błąd serwera podczas importu faktury.' });
+    } finally {
+        if (connection) await connection.end();
     }
 });
 

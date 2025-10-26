@@ -6,7 +6,6 @@ import Navbar from '../components/Layout/Navbar';
 import UploadForm from '../components/Invoices/UploadForm';
 import InvoiceTable from '../components/Invoices/InvoiceTable';
 import SearchBar from '../components/SearchBar';
-import FilterBar from '../components/Invoices/FilterBar';
 import Reports from '../components/Tools/Reports';
 import Settings from '../components/Tools/Settings';
 import KsefManager from '../components/Tools/KsefManager';
