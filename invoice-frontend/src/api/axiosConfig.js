@@ -4,7 +4,7 @@ import axios from 'axios';
 //    Wszystkie zapytania wysyłane przez 'api' będą domyślnie kierowane
 //    na adres 'http://localhost:3000/api'.
 const api = axios.create({
-    baseURL: process.env.REACT_APP_API_URL || 'http://localhost:3000/api',
+    baseURL: import.meta.env?.VITE_API_URL || 'http://localhost:3000/api',
 });
 
 // 2. Konfiguracja "interceptora" dla zapytań wychodzących.
@@ -47,7 +47,7 @@ api.interceptors.response.use(
             // Przekieruj na stronę logowania.
             // Używamy `window.location.replace`, ponieważ jesteśmy poza kontekstem React Router.
             // To jest twarde przeładowanie strony, które jest w tym przypadku pożądane.
-            window.location.replace('/login');
+            window.location.replace('/api/login');
             console.error("Błąd autoryzacji - wylogowywanie.");
         }
         

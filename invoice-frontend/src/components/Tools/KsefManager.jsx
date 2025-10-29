@@ -1,4 +1,6 @@
 import React, { useState, useEffect } from 'react';
+import Button from '../ui/Button';
+import Card from '../ui/Card';
 import api from '../../api/axiosConfig';
 import KsefCertificateManager from './KsefCertificateManager';
 
@@ -116,7 +118,7 @@ const KsefManager = () => {
     };
 
     return (
-        <div className="tools-section">
+        <Card className="mt-6">
             <h2>Zarządzanie Integracją z KSeF</h2>
             <p>Skonfiguruj połączenie z Krajowym Systemem e-Faktur, aby automatycznie pobierać i importować faktury zakupu.</p>
 
@@ -126,31 +128,37 @@ const KsefManager = () => {
             <div className="tool-item">
                 <h4>Krok 2: Ustawienia Połączenia</h4>
                 <label htmlFor="ksef_nip">Twój NIP</label>
-                <input type="text" id="ksef_nip" name="ksef_nip" value={settings.ksef_nip} onChange={handleSettingsChange} />
+                <input type="text" id="ksef_nip" name="ksef_nip" value={settings.ksef_nip} onChange={handleSettingsChange} className="rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500" />
                 
                 <label htmlFor="ksef_token">Token Autoryzacyjny KSeF</label>
-                <input type="password" id="ksef_token" name="ksef_token" value={settings.ksef_token} onChange={handleSettingsChange} />
-                <button onClick={handleSaveSettings}>Zapisz Ustawienia</button>
+                <input type="password" id="ksef_token" name="ksef_token" value={settings.ksef_token} onChange={handleSettingsChange} className="rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                <Button onClick={handleSaveSettings} variant="primary" className="mt-2">Zapisz Ustawienia</Button>
             </div>
             <hr />
 
             <div className="tool-item">
                 <h4>Krok 3: Test Połączenia</h4>
                 <p>Sprawdź, czy Twoje certyfikaty i token pozwalają na pomyślne zainicjowanie sesji z KSeF.</p>
-                <button onClick={handleTestConnection}>Testuj Połączenie</button>
+                <Button onClick={handleTestConnection} variant="secondary">Testuj Połączenie</Button>
             </div>
             <hr />
             
             <div className="tool-item">
                 <h4>Krok 4: Pobieranie i Import Faktur</h4>
                 <label htmlFor="startDate">Pobierz faktury od dnia:</label>
-                <input type="date" id="startDate" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
-                <button onClick={handleFetchInvoices}>Pobierz listę faktur z KSeF</button>
+                <input type="date" id="startDate" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                <Button onClick={handleFetchInvoices} variant="primary" className="mt-2">Pobierz listę faktur z KSeF</Button>
             </div>
 
             {isLoading && <p>Przetwarzanie...</p>}
             {status.message && (
-                <div className={`status-message ${status.type}`}>
+                <div className={`mt-3 rounded-md border px-3 py-2 text-sm ${
+                    status.type === 'error'
+                        ? 'border-red-200 bg-red-50 text-red-700'
+                        : status.type === 'success'
+                        ? 'border-green-200 bg-green-50 text-green-700'
+                        : 'border-accent-200 bg-accent-50 text-accent-700'
+                }`}>
                     {status.message}
                 </div>
             )}
@@ -173,9 +181,9 @@ const KsefManager = () => {
                                     <td>{inv.sellerName}</td>
                                     <td>{parseFloat(inv.grossAmount).toFixed(2)} zł</td>
                                     <td>
-                                        <button onClick={() => handleImportInvoice(inv.ksefReferenceNumber)} disabled={isLoading}>
+                                        <Button onClick={() => handleImportInvoice(inv.ksefReferenceNumber)} disabled={isLoading} variant="outline">
                                             Importuj
-                                        </button>
+                                        </Button>
                                     </td>
                                 </tr>
                             ))}
@@ -183,7 +191,7 @@ const KsefManager = () => {
                     </table>
                 </div>
             )}
-        </div>
+        </Card>
     );
 };
 

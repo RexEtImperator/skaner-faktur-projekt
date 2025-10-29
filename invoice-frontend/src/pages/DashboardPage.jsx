@@ -8,6 +8,7 @@ import InvoiceTable from '../components/Invoices/InvoiceTable';
 import SearchBar from '../components/SearchBar';
 import Reports from '../components/Tools/Reports';
 import Settings from '../components/Tools/Settings';
+import Card from '../components/ui/Card';
 import KsefManager from '../components/Tools/KsefManager';
 
 /**
@@ -87,20 +88,17 @@ const DashboardPage = () => {
     return (
         <>
             <Navbar />
-            <main className="container">
-                {error && <div className="error-message">{error}</div>}
+            <main className="mx-auto max-w-7xl bg-white p-6 rounded-lg shadow">
+                {error && (
+                    <div className="mt-2 rounded-md border border-red-200 bg-red-50 text-red-700 px-3 py-2 text-sm">
+                        {error}
+                    </div>
+                )}
 
-                <h1>Panel Główny</h1>
+                <h1 className="text-2xl font-semibold text-slate-800">Panel Główny</h1>
                 <UploadForm categories={categories} onUploadSuccess={fetchData} />
-                
-                <div className="tools-grid">
-                    <Reports />
-                    <Settings />
-                </div>
-                
-                <KsefManager />
-                
-                <h2>Zapisane Faktury</h2>
+
+                <h2 className="mt-8 text-xl font-semibold text-slate-800 border-b border-slate-200 pb-2">Zapisane Faktury</h2>
                 <SearchBar onSearch={handleSearch} onClear={clearSearch} />
                 
                 {isLoading ? (

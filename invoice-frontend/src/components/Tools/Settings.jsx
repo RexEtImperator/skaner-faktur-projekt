@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import api from '../../api/axiosConfig';
+import Button from '../ui/Button';
 
 // Helper do pobierania plików (można go wynieść do osobnego pliku utils.js)
 const downloadFile = (blob, filename) => {
@@ -32,13 +33,15 @@ const Settings = () => {
     };
 
     return (
-        <div className="tools-section">
-            <h3>Ustawienia i Narzędzia</h3>
-            <div className="tool-item">
-                <p>Utwórz i pobierz pełną kopię zapasową swoich danych.</p>
-                <button onClick={handleBackup}>Pobierz kopię zapasową (SQL)</button>
+        <div>
+            <h3 className="text-lg font-semibold text-slate-800">Ustawienia i Narzędzia</h3>
+            <div className="mt-4">
+                <p className="text-sm text-slate-600">Utwórz i pobierz pełną kopię zapasową swoich danych.</p>
+                <Button onClick={handleBackup} variant="secondary" className="mt-2">Pobierz kopię zapasową (SQL)</Button>
             </div>
-             {status && <p className="tool-status">{status}</p>}
+            {status && (
+                <p className="mt-3 text-accent-700 bg-accent-50 border border-accent-200 rounded-md px-3 py-2 text-sm">{status}</p>
+            )}
         </div>
     );
 };

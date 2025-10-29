@@ -3,6 +3,9 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 
 import DashboardPage from './pages/DashboardPage';
+import ReportsPage from './pages/ReportsPage';
+import ToolsSettingsPage from './pages/ToolsSettingsPage';
+import KsefPage from './pages/KsefPage';
 import LoginPage from './components/Auth/LoginPage';
 import RegisterPage from './components/Auth/RegisterPage';
 
@@ -83,6 +86,30 @@ function App() {
                         element={
                             <ProtectedRoute>
                                 <DashboardPage />
+                            </ProtectedRoute>
+                        }
+                    />
+                    <Route
+                        path="/settings/reports"
+                        element={
+                            <ProtectedRoute>
+                                <ReportsPage />
+                            </ProtectedRoute>
+                        }
+                    />
+                    <Route
+                        path="/settings/tools"
+                        element={
+                            <ProtectedRoute>
+                                <ToolsSettingsPage />
+                            </ProtectedRoute>
+                        }
+                    />
+                    <Route
+                        path="/settings/ksef"
+                        element={
+                            <ProtectedRoute>
+                                <KsefPage />
                             </ProtectedRoute>
                         }
                     />

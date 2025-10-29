@@ -1,6 +1,6 @@
 Skaner Faktur — dokumentacja
 
-![alt text](https://img.shields.io/badge/license-MIT-blue.svg)
+![alt text](https://img.shields.io/badge/GPL-3?label=LICENSE&color=blue)
 ![alt text](https://img.shields.io/badge/React-18.2.0-61DAFB?logo=react)
 ![alt text](https://img.shields.io/badge/Node.js-18.x-339933?logo=node.js)
 ![alt text](https://img.shields.io/badge/MySQL-8.0-4479A1?logo=mysql)
@@ -78,6 +78,26 @@ Funkcje kluczowe:
 - Worker IMAP: `invoice-backend/imap-worker.js`
 - Eksport do Excel i raporty PDF
 - Kopia bazy danych
+
+Nowe funkcje (płatności):
+- Pola `payment_status` i `payment_due_date` w tabeli `invoices` (SQL).
+- Upload (`POST /api/upload`) zapisuje status i termin płatności z formularza.
+- Edycja w tabeli: wybór `payment_status` oraz edycja `payment_due_date` (pole daty).
+- Walidacja frontend: dla statusu `zapłacona` termin płatności nie może być w przeszłości.
+- Wyliczanie statusu „po terminie” odbywa się wyłącznie po stronie frontend na podstawie `payment_due_date`.
+- Widok tylko‑do‑odczytu zawiera kolumnę „Termin płatności”.
+
+Zmiany w API (płatności):
+- `PUT /api/invoices/:id` — obsługuje aktualizację `payment_status` i `payment_due_date`.
+- `POST /api/invoices` — ręczne tworzenie faktury z obsługą pól płatności.
+- `POST /api/ksef/import-invoice` — zapisuje `payment_status` (domyślnie `niezapłacona`) i `payment_due_date` (domyślnie `NULL`).
+- `GET /api/invoices` — usunięto serwerową normalizację „po terminie”; logika przeniesiona na frontend.
+
+Migracje (setup‑mysql.sql):
+- Dla istniejących instalacji dodano:
+  - `ALTER TABLE invoices ADD COLUMN IF NOT EXISTS payment_status VARCHAR(20) DEFAULT NULL;`
+  - `ALTER TABLE invoices ADD COLUMN IF NOT EXISTS payment_due_date DATE DEFAULT NULL;`
+  Jeśli używasz starszej wersji MySQL bez `IF NOT EXISTS`, dodaj kolumny ręcznie lub dostarczymy alternatywny skrypt.
 
 Autoryzacja API:
 - Rejestracja: `POST /api/register { email, password }`

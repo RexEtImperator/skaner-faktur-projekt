@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import Button from './ui/Button';
 
 const SearchBar = ({ onSearch, onClear }) => {
     const [query, setQuery] = useState('');
@@ -16,15 +17,16 @@ const SearchBar = ({ onSearch, onClear }) => {
     }
 
     return (
-        <form onSubmit={handleSearch} className="search-bar">
+        <form onSubmit={handleSearch} className="flex gap-2 items-center mb-4">
             <input
                 type="text"
                 placeholder="Szukaj po numerze faktury lub NIP..."
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
+                className="flex-1 rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
-            <button type="submit">Szukaj</button>
-            <button type="button" onClick={handleClear}>Wyczyść</button>
+            <Button type="submit" variant="secondary">Szukaj</Button>
+            <Button type="button" variant="outline" onClick={handleClear}>Wyczyść</Button>
         </form>
     );
 };

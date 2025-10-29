@@ -21,6 +21,7 @@ const { ImageAnnotatorClient } = require('@google-cloud/vision');
 const exceljs = require('exceljs');
 const PDFDocument = require('pdfkit');
 const mysqldump = require('mysqldump');
+const { validatePolishNIP, normalizeAndValidateIBAN, detectSplitPaymentRequired } = require('./utils/validators');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -77,51 +78,100 @@ const certUpload = multer({ storage: certStorage });
 
 // --- Funkcja pomocnicza do parsowania tekstu ---
 function parseText(text) {
+    // Pomocnicza normalizacja dat w formatach DD.MM.YYYY / DD-MM-YYYY / DD/MM/YYYY do YYYY-MM-DD
+    const normalizeDateStr = (s) => {
+        if (!s || typeof s !== 'string') return s;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+        const m = s.match(/^(\d{2})[./-](\d{2})[./-](\d{4})$/);
+        if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+        return s;
+    };
+
     const data = {
         items: [],
         totalNetAmount: null,
         totalVatAmount: null,
-        totalGrossAmount: null
+        totalGrossAmount: null,
+        paymentMethod: null,
+        paymentDate: null,
+        trackingNumber: null,
+        amountInWords: null,
+        bankAccount: null,
+        currency: null,
+        sellerName: null,
+        buyerName: null,
+        dayMonthYear: null,
+        mppRequired: false,
+        vatBreakdown: []
     };
 
-    // Proste wzorce do wyszukiwania kluczowych informacji
+    // Wzorce do wyszukiwania kluczowych informacji (bardziej elastyczne warianty)
     const patterns = {
-        invoiceNumber: /Faktura nr[:\s]*([\w\/\-]+)/i,
-        issueDate: /Data wystawienia[:\s]*(\d{4}-\d{2}-\d{2})/i,
-        sellerNIP: /NIP sprzedawcy[:\s]*(\d{10})/i,
-        buyerNIP: /NIP nabywcy[:\s]*(\d{10})/i,
-        totalGrossAmount: /Do zapłaty[:\s]*([\d\s,.]+)\s*PLN/i
+        invoiceNumber: /(?:Faktura(?:\s+VAT)?\s+nr|Numer\s+Faktury|Nr\s+faktury)\s*[:\s]*([\w\/\-.\_]+)/i,
+        issueDate: /(?:Data\s+wystawienia|Data)\s*[:\s]*((?:\d{4}-\d{2}-\d{2})|(?:\d{2}[./-]\d{2}[./-]\d{4}))/i,
+        sellerNIP: /NIP\s+sprzedawcy\s*[:\s]*(\d{10})/i,
+        buyerNIP: /NIP\s+nabywcy\s*[:\s]*(\d{10})/i,
+        totalGrossAmount: /(?:Razem\s+do\s+zapłaty|Do\s+zapłaty|Kwota\s+brutto|Suma\s+brutto)\s*[:\s]*([\d\s,.]+)\s*(PLN|EUR|USD|[A-Z]{3})?/i,
+        paymentMethod: /Forma\s+płatności\s*[:\s]*([A-Za-z0-9\- ]+)/i,
+        paymentDate: /(?:Termin\s+płatności|Termin)\s*[:\s]*((?:\d{4}-\d{2}-\d{2})|(?:\d{2}[./-]\d{2}[./-]\d{4}))/i,
+        trackingNumber: /Nr\s+listy\s+przewozowej\s*[:\s]*([A-Za-z0-9\-]+)/i,
+        amountInWords: /Słownie\s*[:\s]*(.+)/i,
+        bankAccount: /Nr\s+rachunku\s*[:\s]*([A-Z]{2}[0-9A-Z ]{26,})/i,
+        sellerName: /Sprzedawca\s*[:\s]*([\p{L}0-9\-., ]+)/iu,
+        buyerName: /Nabywca\s*[:\s]*([\p{L}0-9\-., ]+)/iu
     };
 
     for (const [key, regex] of Object.entries(patterns)) {
         const match = text.match(regex);
         if (match && match[1]) {
-            data[key] = match[1].trim();
+            let value = match[1].trim();
+            // Normalizacja dat na format YYYY-MM-DD
+            if (key === 'issueDate' || key === 'paymentDate') {
+                value = normalizeDateStr(value);
+            }
+            data[key] = value;
+        }
+        // Dla kwoty brutto wyciągnij walutę, jeśli pasuje
+        if (key === 'totalGrossAmount' && match && match[2]) {
+            data.currency = match[2];
         }
     }
 
     // Przetwarzanie kwoty brutto
     if (data.totalGrossAmount) {
-        data.totalGrossAmount = parseFloat(data.totalGrossAmount.replace(/\s/g, '').replace(',', '.'));
+        const grossStr = Array.isArray(data.totalGrossAmount) ? data.totalGrossAmount[0] : data.totalGrossAmount;
+        const parsedGross = parseFloat(grossStr.replace(/\s/g, '').replace(',', '.'));
+        data.totalGrossAmount = Number.isFinite(parsedGross) ? parsedGross : null;
+    }
+    // Fallback waluty
+    if (!data.currency) {
+        const currencyMatch = text.match(/\b(PLN|EUR|USD|[A-Z]{3})\b/);
+        if (currencyMatch) data.currency = currencyMatch[1];
     }
 
-    // Obliczanie month_year
+    // Obliczanie day_month_year
     if (data.issueDate) {
         const date = new Date(data.issueDate);
-        data.monthYear = `${(date.getMonth() + 1).toString().padStart(2, '0')}/${date.getFullYear()}`;
+        const dd = String(date.getDate()).padStart(2, '0');
+        const mm = String(date.getMonth() + 1).padStart(2, '0');
+        const yyyy = String(date.getFullYear());
+        data.dayMonthYear = `${dd}/${mm}/${yyyy}`;
     }
 
-    // Przykładowa, uproszczona logika do parsowania pozycji - wymaga dostosowania do formatu faktur
-    const itemRegex = /^(.+?)\s+(\d+[,.]\d{2})\s+(\d+[,.]\d{2})\s+(\d+[,.]\d{2})\s+([\d,.]+%?|zw.)$/gm;
+    // Pozycje: opis, cena netto jedn., kwota VAT, kwota brutto, stawka VAT
+    const itemRegex = /^(.+?)\s+(\d+[,.]\d{2})\s+(\d+[,.]\d{2})\s+(\d+[,.]\d{2})\s+([\d,.]+%?|zw\.)$/gm;
     let match;
     while ((match = itemRegex.exec(text)) !== null) {
         data.items.push({
             description: match[1].trim(),
-            unit_price_net: parseFloat(match[2].replace(',', '.')), // Cena jedn. netto
-            total_net_amount: parseFloat(match[2].replace(',', '.')), // Wartość netto (uproszczenie, powinno być liczone)
-            vat_rate: match[5].trim(), // Stawka VAT
-            total_vat_amount: parseFloat(match[3].replace(',', '.')), // Kwota VAT
-            total_gross_amount: parseFloat(match[4].replace(',', '.')) // Wartość brutto
+            quantity: 1,
+            unit: 'szt',
+            catalog_number: null,
+            unit_price_net: parseFloat(match[2].replace(',', '.')),
+            total_net_amount: parseFloat(match[2].replace(',', '.')),
+            vat_rate: match[5].trim(),
+            total_vat_amount: parseFloat(match[3].replace(',', '.')),
+            total_gross_amount: parseFloat(match[4].replace(',', '.'))
         });
     }
 
@@ -129,9 +179,37 @@ function parseText(text) {
     if (data.items.length > 0) {
         data.totalNetAmount = data.items.reduce((sum, item) => sum + item.total_net_amount, 0);
         data.totalVatAmount = data.items.reduce((sum, item) => sum + item.total_vat_amount, 0);
-        // Suma brutto z pozycji może być użyta do weryfikacji z kwotą "Do zapłaty"
         data.totalGrossAmount = data.items.reduce((sum, item) => sum + item.total_gross_amount, 0);
+        // Rozbicie VAT per stawka
+        const acc = new Map();
+        for (const it of data.items) {
+            const key = (it.vat_rate || '').toString();
+            if (!acc.has(key)) acc.set(key, { net: 0, vat: 0, gross: 0 });
+            const a = acc.get(key);
+            a.net += Number(it.total_net_amount || 0);
+            a.vat += Number(it.total_vat_amount || 0);
+            a.gross += Number(it.total_gross_amount || 0);
+        }
+        data.vatBreakdown = Array.from(acc.entries()).map(([rate, amounts]) => ({
+            vat_rate: rate,
+            net_amount: amounts.net,
+            vat_amount: amounts.vat,
+            gross_amount: amounts.gross
+        }));
     }
+
+    // Walidacja NIP
+    if (data.sellerNIP && !validatePolishNIP(data.sellerNIP)) data.sellerNIP = null;
+    if (data.buyerNIP && !validatePolishNIP(data.buyerNIP)) data.buyerNIP = null;
+
+    // Walidacja IBAN
+    if (data.bankAccount) {
+        const iban = normalizeAndValidateIBAN(data.bankAccount);
+        data.bankAccount = iban || null;
+    }
+
+    // Detekcja MPP
+    data.mppRequired = detectSplitPaymentRequired(data.totalGrossAmount, text);
 
     return data;
 }
@@ -215,6 +293,40 @@ app.get('/api/categories', verifyToken, async (req, res) => {
         res.json(rows);
     } catch (error) {
         res.status(500).json({ message: 'Błąd serwera.' });
+    }
+});
+
+// Dodawanie nowej kategorii
+app.post('/api/categories', verifyToken, async (req, res) => {
+    const { name } = req.body;
+    if (!name || !name.trim()) {
+        return res.status(400).json({ message: 'Nazwa kategorii jest wymagana.' });
+    }
+    try {
+        const connection = await mysql.createConnection(dbConfig);
+        const [result] = await connection.execute('INSERT INTO categories (user_id, name) VALUES (?, ?)', [req.userId, name.trim()]);
+        await connection.end();
+        res.status(201).json({ id: result.insertId, name: name.trim() });
+    } catch (error) {
+        console.error('Błąd dodawania kategorii:', error);
+        res.status(500).json({ message: 'Błąd serwera podczas dodawania kategorii.' });
+    }
+});
+
+// Usuwanie kategorii
+app.delete('/api/categories/:id', verifyToken, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const connection = await mysql.createConnection(dbConfig);
+        const [result] = await connection.execute('DELETE FROM categories WHERE id = ? AND user_id = ?', [id, req.userId]);
+        await connection.end();
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: 'Kategoria nie została znaleziona.' });
+        }
+        res.json({ message: 'Kategoria usunięta.' });
+    } catch (error) {
+        console.error('Błąd usuwania kategorii:', error);
+        res.status(500).json({ message: 'Błąd serwera podczas usuwania kategorii.' });
     }
 });
 
@@ -315,35 +427,111 @@ app.post('/api/upload', verifyToken, invoiceUpload.single('invoice'), async (req
         }
 
         const invoiceData = parseText(text);
-        if (!invoiceData.invoiceNumber || !invoiceData.totalGrossAmount) {
-            return res.status(400).json({ message: 'Nie udało się odczytać kluczowych danych z faktury.' });
+
+        // Nadpisania z formularza (opcjonalnie)
+        const overrides = {
+            invoiceNumber: req.body.invoice_number,
+            issueDate: req.body.issue_date,
+            deliveryDate: req.body.delivery_date,
+            sellerNIP: req.body.seller_nip,
+            buyerNIP: req.body.buyer_nip,
+            sellerName: req.body.seller_name,
+            buyerName: req.body.buyer_name,
+            totalNetAmount: req.body.total_net_amount,
+            totalVatAmount: req.body.total_vat_amount,
+            totalGrossAmount: req.body.total_gross_amount,
+            currency: req.body.currency,
+            paymentMethod: req.body.payment_method,
+            bankAccount: req.body.bank_account,
+            paymentDate: req.body.payment_date
+        };
+        Object.entries(overrides).forEach(([key, val]) => {
+            if (typeof val !== 'undefined' && val !== null && val !== '') {
+                invoiceData[key] = val;
+            }
+        });
+
+        // Tryb podglądu: zwróć wykryte dane i surowy tekst bez zapisu
+        if (req.body.preview === 'true') {
+            await connection.end();
+            return res.status(200).json({ preview: true, data: invoiceData, rawText: (text || '').split(/\r?\n/) });
+        }
+        const isFallback = (!invoiceData.invoiceNumber || !invoiceData.totalGrossAmount);
+        if (isFallback) {
+            // Zapisz fakturę w trybie fallback: minimalne dane, oznacz jako do przeglądu
+            invoiceData.invoiceNumber = invoiceData.invoiceNumber || `NIEZNANY-${Date.now()}`;
+            // issueDate może pozostać null, aby nie wprowadzać fałszywej daty
+            // totalGrossAmount pozostaje null, jeśli nie udało się wyliczyć, pozycje mogą uzupełnić kwoty
         }
 
         // Rozpocznij transakcję
         await connection.beginTransaction();
 
-        const invoiceSql = 'INSERT INTO invoices (user_id, invoice_number, issue_date, seller_nip, buyer_nip, total_net_amount, total_vat_amount, total_gross_amount, month_year) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)';
+        const invoiceSql = 'INSERT INTO invoices (user_id, invoice_number, issue_date, delivery_date, seller_nip, buyer_nip, seller_name, buyer_name, total_net_amount, total_vat_amount, total_gross_amount, currency, day_month_year, payment_method, bank_account, payment_date, payment_status, payment_due_date, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
         const [invoiceResult] = await connection.execute(invoiceSql, [
-            req.userId, invoiceData.invoiceNumber, invoiceData.issueDate, invoiceData.sellerNIP,
-            invoiceData.buyerNIP, invoiceData.totalNetAmount, invoiceData.totalVatAmount, invoiceData.totalGrossAmount, invoiceData.monthYear
+            req.userId,
+            invoiceData.invoiceNumber,
+            invoiceData.issueDate,
+            null,
+            invoiceData.sellerNIP || null,
+            invoiceData.buyerNIP || null,
+            invoiceData.sellerName || null,
+            invoiceData.buyerName || null,
+            invoiceData.totalNetAmount || null,
+            invoiceData.totalVatAmount || null,
+            invoiceData.totalGrossAmount || null,
+            invoiceData.currency || 'PLN',
+            invoiceData.dayMonthYear || null,
+            invoiceData.paymentMethod || null,
+            invoiceData.bankAccount || null,
+            invoiceData.paymentDate || null,
+            // Pola z formularza uploadu (multipart): req.body
+            (isFallback ? 'do_review' : (req.body.payment_status || null)),
+            req.body.payment_due_date || null,
+            req.body.notes || null
         ]);
         const invoiceId = invoiceResult.insertId;
 
         // Zapisz pozycje faktury
         if (invoiceData.items && invoiceData.items.length > 0) {
-            const itemsSql = 'INSERT INTO invoice_items (invoice_id, description, quantity, unit_price_net, vat_rate, total_net_amount, total_vat_amount, total_gross_amount) VALUES ?';
+            const itemsSql = 'INSERT INTO invoice_items (invoice_id, description, quantity, unit, catalog_number, unit_price_net, vat_rate, total_net_amount, total_vat_amount, total_gross_amount) VALUES ?';
             const itemsValues = invoiceData.items.map(item => [
-                invoiceId, item.description, item.quantity || 1, item.unit_price_net, item.vat_rate, 
-                item.total_net_amount, item.total_vat_amount, item.total_gross_amount
+                invoiceId,
+                item.description,
+                item.quantity || 1,
+                item.unit || null,
+                item.catalog_number || null,
+                item.unit_price_net,
+                item.vat_rate,
+                item.total_net_amount,
+                item.total_vat_amount,
+                item.total_gross_amount
             ]);
             await connection.query(itemsSql, [itemsValues]);
+
+            // Zapis rozbicia VAT per stawka
+            if (invoiceData.vatBreakdown && invoiceData.vatBreakdown.length > 0) {
+                const vatSql = 'INSERT INTO invoice_vat_breakdown (invoice_id, vat_rate, net_amount, vat_amount, gross_amount) VALUES ?';
+                const vatValues = invoiceData.vatBreakdown.map(v => [
+                    invoiceId,
+                    v.vat_rate,
+                    v.net_amount,
+                    v.vat_amount,
+                    v.gross_amount
+                ]);
+                await connection.query(vatSql, [vatValues]);
+            }
         }
 
         // Zatwierdź transakcję
         await connection.commit();
         await connection.end();
 
-        res.status(201).json({ message: 'Faktura przetworzona i zapisana!', data: invoiceData });
+        if (isFallback) {
+            res.status(201).json({ message: 'Faktura zapisana do weryfikacji (niepełne dane).', fallback: true, data: invoiceData });
+        } else {
+            res.status(201).json({ message: 'Faktura przetworzona i zapisana!', data: invoiceData });
+        }
     } catch (error) {
         console.error('Błąd przetwarzania pliku:', error);
         res.status(500).send('Wystąpił błąd serwera.');
@@ -377,6 +565,8 @@ app.get('/api/invoices', verifyToken, async (req, res) => {
         // Krok 3: Wykonaj zapytanie, bezpiecznie przekazując ID użytkownika jako parametr.
         const [invoices] = await connection.execute(sql, [req.userId]);
 
+        // Obliczanie statusu "po terminie" pozostaje po stronie frontend.
+
         // Krok 4: Jeśli zażądano pozycji faktur (includeItems=true) i znaleziono jakieś faktury...
         if (includeItems === 'true' && invoices.length > 0) {
             // ...pobierz wszystkie pozycje dla znalezionych faktur w jednym zapytaniu dla wydajności.
@@ -393,8 +583,17 @@ app.get('/api/invoices', verifyToken, async (req, res) => {
                 return acc;
             }, {});
 
+            // Pobierz rozbicie VAT dla tych faktur
+            const [vatRows] = await connection.query('SELECT * FROM invoice_vat_breakdown WHERE invoice_id IN (?)', [invoiceIds]);
+            const vatByInvoiceId = vatRows.reduce((acc, row) => {
+                if (!acc[row.invoice_id]) acc[row.invoice_id] = [];
+                acc[row.invoice_id].push(row);
+                return acc;
+            }, {});
+
             invoices.forEach(invoice => {
                 invoice.items = itemsByInvoiceId[invoice.id] || [];
+                invoice.vat_breakdown = vatByInvoiceId[invoice.id] || [];
             });
         }
         
@@ -436,13 +635,20 @@ app.get('/api/invoices/:id', verifyToken, async (req, res) => {
 app.put('/api/invoices/:id', verifyToken, async (req, res) => {
     const { id } = req.params;
     const { 
-        invoice_number, 
-        issue_date, 
-        seller_nip, 
-        buyer_nip, 
-        total_net_amount, 
-        total_vat_amount, 
-        total_gross_amount 
+        invoice_number,
+        issue_date,
+        delivery_date,
+        seller_nip,
+        buyer_nip,
+        seller_name,
+        buyer_name,
+        total_net_amount,
+        total_vat_amount,
+        total_gross_amount,
+        currency,
+        payment_method,
+        bank_account,
+        payment_date
     } = req.body;
 
     // Prosta walidacja
@@ -450,27 +656,38 @@ app.put('/api/invoices/:id', verifyToken, async (req, res) => {
         return res.status(400).json({ message: 'Brak wymaganych danych (numer faktury, data, kwota brutto).' });
     }
 
-    // Obliczanie month_year na podstawie nowej daty
+    // Obliczanie day_month_year na podstawie nowej daty
     const date = new Date(issue_date);
-    const month_year = `${(date.getMonth() + 1).toString().padStart(2, '0')}/${date.getFullYear()}`;
+    const day_month_year = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
 
     try {
         const connection = await mysql.createConnection(dbConfig);
         const sql = `
             UPDATE invoices 
-            SET invoice_number = ?, issue_date = ?, seller_nip = ?, buyer_nip = ?, 
-                total_net_amount = ?, total_vat_amount = ?, total_gross_amount = ?, month_year = ?
+            SET invoice_number = ?, issue_date = ?, delivery_date = ?, seller_nip = ?, buyer_nip = ?,
+                seller_name = ?, buyer_name = ?, total_net_amount = ?, total_vat_amount = ?, total_gross_amount = ?,
+                currency = ?, day_month_year = ?, payment_method = ?, bank_account = ?, payment_date = ?,
+                payment_status = ?, payment_due_date = ?
             WHERE id = ? AND user_id = ?
         `;
         const [result] = await connection.execute(sql, [
             invoice_number,
             issue_date,
-            seller_nip,
-            buyer_nip,
-            total_net_amount,
-            total_vat_amount,
-            total_gross_amount,
-            month_year,
+            delivery_date || null,
+            seller_nip || null,
+            buyer_nip || null,
+            seller_name || null,
+            buyer_name || null,
+            total_net_amount || null,
+            total_vat_amount || null,
+            total_gross_amount || null,
+            currency || 'PLN',
+            day_month_year,
+            payment_method || null,
+            bank_account || null,
+            payment_date || null,
+            req.body.payment_status || null,
+            req.body.payment_due_date || null,
             id,
             req.userId
         ]);
@@ -524,11 +741,26 @@ app.get('/api/search', verifyToken, async (req, res) => {
             WHERE i.user_id = ? AND (
                 i.invoice_number LIKE ? OR 
                 i.seller_nip LIKE ? OR 
-                i.buyer_nip LIKE ?
+                i.buyer_nip LIKE ? OR 
+                i.seller_name LIKE ? OR 
+                i.buyer_name LIKE ? OR 
+                i.currency LIKE ? OR 
+                i.payment_method LIKE ? OR 
+                i.bank_account LIKE ?
             )
             ORDER BY issue_date DESC
         `;
-        const [rows] = await connection.execute(sql, [req.userId, searchQuery, searchQuery, searchQuery]);
+        const [rows] = await connection.execute(sql, [
+            req.userId,
+            searchQuery,
+            searchQuery,
+            searchQuery,
+            searchQuery,
+            searchQuery,
+            searchQuery,
+            searchQuery,
+            searchQuery
+        ]);
         await connection.end();
         res.json(rows);
     } catch (error) {
@@ -539,31 +771,31 @@ app.get('/api/search', verifyToken, async (req, res) => {
 
 /**
  * Endpoint: GET /api/export
- * Przeznaczenie: Eksportuje faktury z danego miesiąca i roku do pliku Excel (.xlsx).
+ * Przeznaczenie: Eksportuje faktury z danego dnia/miesiąca/roku do pliku Excel (.xlsx).
  * Parametry zapytania (query):
- *  - monthYear (string, wymagany): Miesiąc i rok w formacie "MM/YYYY", np. "10/2025".
+ *  - dayMonthYear (string, wymagany): Data w formacie "DD/MM/YYYY", np. "25/10/2025".
  * Zabezpieczenia: Wymaga ważnego tokenu JWT.
  */
 app.get('/api/export', verifyToken, async (req, res) => {
-    const { monthYear } = req.query;
+    const { dayMonthYear } = req.query;
     let connection;
 
     // Krok 1: Walidacja danych wejściowych.
-    if (!monthYear || !/^\d{2}\/\d{4}$/.test(monthYear)) {
-        return res.status(400).json({ message: 'Należy podać prawidłowy miesiąc i rok w formacie DD/MM/YYYY.' });
+    if (!dayMonthYear || !/^\d{2}\/\d{2}\/\d{4}$/.test(dayMonthYear)) {
+        return res.status(400).json({ message: 'Należy podać prawidłową datę w formacie DD/MM/YYYY.' });
     }
 
     try {
         // Krok 2: Połączenie z bazą danych i pobranie odpowiednich danych.
         connection = await mysql.createConnection(dbConfig);
         const sql = `
-            SELECT i.invoice_number, i.issue_date, i.seller_nip, i.buyer_nip, i.total_gross_amount, c.name AS category_name
+            SELECT i.invoice_number, i.issue_date, i.delivery_date, i.seller_nip, i.buyer_nip, i.seller_name, i.buyer_name, i.currency, i.payment_method, i.bank_account, i.total_net_amount, i.total_vat_amount, i.total_gross_amount, c.name AS category_name
             FROM invoices i
             LEFT JOIN categories c ON i.category_id = c.id
-            WHERE i.user_id = ? AND i.month_year = ?
+            WHERE i.user_id = ? AND i.day_month_year = ?
             ORDER BY i.issue_date ASC
         `;
-        const [rows] = await connection.execute(sql, [req.userId, monthYear]);
+        const [rows] = await connection.execute(sql, [req.userId, dayMonthYear]);
         
         // Krok 3: Stworzenie nowego skoroszytu i arkuszy w Excelu.
         const workbook = new exceljs.Workbook();
@@ -576,20 +808,36 @@ app.get('/api/export', verifyToken, async (req, res) => {
         ];
         descriptionSheet.addRow({ name: 'invoice_number', desc: 'Numer odczytany z faktury.' });
         descriptionSheet.addRow({ name: 'issue_date', desc: 'Data wystawienia faktury.' });
+        descriptionSheet.addRow({ name: 'delivery_date', desc: 'Data dostawy/wykonania usługi.' });
         descriptionSheet.addRow({ name: 'seller_nip', desc: 'Numer Identyfikacji Podatkowej (NIP) sprzedawcy.' });
         descriptionSheet.addRow({ name: 'buyer_nip', desc: 'Numer Identyfikacji Podatkowej (NIP) nabywcy.' });
-        descriptionSheet.addRow({ name: 'total_gross_amount', desc: 'Całkowita kwota brutto (z podatkiem VAT).' });
+        descriptionSheet.addRow({ name: 'seller_name', desc: 'Nazwa sprzedawcy.' });
+        descriptionSheet.addRow({ name: 'buyer_name', desc: 'Nazwa nabywcy.' });
+        descriptionSheet.addRow({ name: 'currency', desc: 'Waluta faktury (np. PLN, EUR).' });
+        descriptionSheet.addRow({ name: 'payment_method', desc: 'Forma płatności z faktury.' });
+        descriptionSheet.addRow({ name: 'bank_account', desc: 'Numer rachunku bankowego (IBAN).' });
+        descriptionSheet.addRow({ name: 'total_net_amount', desc: 'Suma netto faktury.' });
+        descriptionSheet.addRow({ name: 'total_vat_amount', desc: 'Suma VAT faktury.' });
+        descriptionSheet.addRow({ name: 'total_gross_amount', desc: 'Suma brutto faktury.' });
         descriptionSheet.addRow({ name: 'category_name', desc: 'Kategoria wydatku przypisana w systemie.' });
         
         // --- Arkusz 2: Dane Faktur ---
-        const worksheet = workbook.addWorksheet(`Faktury ${monthYear.replace('/', '-')}`);
+        const worksheet = workbook.addWorksheet(`Faktury ${dayMonthYear.replace(/\//g, '-')}`);
         worksheet.columns = [
             { header: 'Numer Faktury', key: 'invoice_number', width: 30 },
             { header: 'Data Wystawienia', key: 'issue_date', width: 18, style: { numFmt: 'yyyy-mm-dd' } },
+            { header: 'Data Dostawy', key: 'delivery_date', width: 18, style: { numFmt: 'yyyy-mm-dd' } },
             { header: 'NIP Sprzedawcy', key: 'seller_nip', width: 20 },
             { header: 'NIP Nabywcy', key: 'buyer_nip', width: 20 },
+            { header: 'Sprzedawca', key: 'seller_name', width: 25 },
+            { header: 'Nabywca', key: 'buyer_name', width: 25 },
             { header: 'Kategoria', key: 'category_name', width: 25 },
-            { header: 'Kwota Brutto', key: 'total_gross_amount', width: 18, style: { numFmt: '#,##0.00 "zł"' } }
+            { header: 'Waluta', key: 'currency', width: 10 },
+            { header: 'Forma płatności', key: 'payment_method', width: 20 },
+            { header: 'Rachunek', key: 'bank_account', width: 30 },
+            { header: 'Suma Netto', key: 'total_net_amount', width: 18, style: { numFmt: '#,##0.00' } },
+            { header: 'Suma VAT', key: 'total_vat_amount', width: 18, style: { numFmt: '#,##0.00' } },
+            { header: 'Suma Brutto', key: 'total_gross_amount', width: 18, style: { numFmt: '#,##0.00' } }
         ];
 
         // Pogrubienie nagłówków
@@ -599,12 +847,14 @@ app.get('/api/export', verifyToken, async (req, res) => {
         rows.forEach(invoice => {
             worksheet.addRow({
                 ...invoice,
-                total_gross_amount: parseFloat(invoice.total_gross_amount)
+                total_net_amount: invoice.total_net_amount ? parseFloat(invoice.total_net_amount) : null,
+                total_vat_amount: invoice.total_vat_amount ? parseFloat(invoice.total_vat_amount) : null,
+                total_gross_amount: invoice.total_gross_amount ? parseFloat(invoice.total_gross_amount) : null
             });
         });
 
         // Krok 4: Ustawienie nagłówków HTTP, aby przeglądarka zainicjowała pobieranie pliku.
-        const fileName = `faktury-${monthYear.replace('/', '-')}.xlsx`;
+        const fileName = `faktury-${dayMonthYear.replace(/\//g, '-')}.xlsx`;
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
 
@@ -626,26 +876,44 @@ app.get('/api/export', verifyToken, async (req, res) => {
 
 // --- Raport PDF ---
 app.get('/api/reports/pdf', verifyToken, async (req, res) => {
-    const { monthYear } = req.query; // format 'MM/YYYY'
-    if (!monthYear) {
-        return res.status(400).send('Należy podać miesiąc i rok.');
+    // Obsługa nowego parametru dayMonthYear (DD/MM/YYYY) z zachowaniem wstecznej kompatybilności
+    const dayMonthYear = req.query.dayMonthYear || req.query.monthYear;
+    if (!dayMonthYear) {
+        return res.status(400).send('Należy podać datę w formacie DD/MM/YYYY.');
     }
 
     try {
         const connection = await mysql.createConnection(dbConfig);
-        const sql = `
+        const invoicesSql = `
             SELECT i.*, c.name as category_name 
             FROM invoices i 
             LEFT JOIN categories c ON i.category_id = c.id 
-            WHERE i.user_id = ? AND i.month_year = ? 
+            WHERE i.user_id = ? AND i.day_month_year = ? 
             ORDER BY issue_date ASC
         `;
-        const [rows] = await connection.execute(sql, [req.userId, monthYear]);
-        const totalAmount = rows.reduce((sum, inv) => sum + parseFloat(inv.total_gross_amount), 0);
+        const [rows] = await connection.execute(invoicesSql, [req.userId, dayMonthYear]);
+
+        // Suma brutto z faktur
+        const totalGross = rows.reduce((sum, inv) => sum + (parseFloat(inv.total_gross_amount) || 0), 0);
+
+        // Zbiorcze podsumowanie VAT po stawkach (z tabeli breakdown)
+        const breakdownSql = `
+            SELECT b.vat_rate, SUM(b.net_amount) AS sum_net, SUM(b.vat_amount) AS sum_vat
+            FROM invoice_vat_breakdown b
+            JOIN invoices i ON i.id = b.invoice_id
+            WHERE i.user_id = ? AND i.day_month_year = ?
+            GROUP BY b.vat_rate
+            ORDER BY b.vat_rate ASC
+        `;
+        const [vatBreakdownRows] = await connection.execute(breakdownSql, [req.userId, dayMonthYear]);
+
+        const totalNet = vatBreakdownRows.reduce((s, r) => s + (parseFloat(r.sum_net) || 0), 0);
+        const totalVat = vatBreakdownRows.reduce((s, r) => s + (parseFloat(r.sum_vat) || 0), 0);
+
         await connection.end();
 
         // Ustawienia nagłówków do pobrania pliku
-        const fileName = `raport-faktur-${monthYear.replace('/', '-')}.pdf`;
+        const fileName = `raport-faktur-${dayMonthYear.replace(/\//g, '-')}.pdf`;
         res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
 
@@ -653,36 +921,76 @@ app.get('/api/reports/pdf', verifyToken, async (req, res) => {
         doc.pipe(res);
 
         // Tworzenie treści PDF
-        doc.fontSize(18).text(`Raport faktur za ${monthYear}`, { align: 'center' });
+        doc.fontSize(18).text(`Raport faktur za ${dayMonthYear}`, { align: 'center' });
         doc.moveDown();
         doc.fontSize(14).text(`Podsumowanie:`);
         doc.fontSize(12).text(`- Liczba faktur: ${rows.length}`);
-        doc.fontSize(12).text(`- Łączna kwota: ${totalAmount.toFixed(2)} zł`);
+        doc.fontSize(12).text(`- Łączna kwota brutto: ${totalGross.toFixed(2)} zł`);
+        doc.fontSize(12).text(`- Łączna kwota netto: ${totalNet.toFixed(2)} zł`);
+        doc.fontSize(12).text(`- Łączny VAT: ${totalVat.toFixed(2)} zł`);
+
+        if (vatBreakdownRows.length) {
+            doc.fontSize(12).text(`Rozbicie VAT wg stawek:`);
+            vatBreakdownRows.forEach(row => {
+                doc.fontSize(11).text(`  • VAT ${row.vat_rate}%: netto ${parseFloat(row.sum_net).toFixed(2)} zł, VAT ${parseFloat(row.sum_vat).toFixed(2)} zł`);
+            });
+        }
+
         doc.moveDown(2);
         
-        // Nagłówki tabeli
+        // Nagłówki tabeli (rozszerzone kolumny)
         const tableTop = 250;
         const itemX = 50;
-        const dateX = 200;
-        const categoryX = 300;
-        const amountX = 450;
+        const dateX = 120;
+        const sellerX = 200;
+        const buyerX = 320;
+        const categoryX = 440;
+        const currencyX = 500;
+        const amountX = 540;
 
-        doc.fontSize(10).text('Nr faktury', itemX, tableTop)
+        doc.fontSize(10)
+           .text('Nr faktury', itemX, tableTop)
            .text('Data', dateX, tableTop)
+           .text('Sprzedawca', sellerX, tableTop)
+           .text('Nabywca', buyerX, tableTop)
            .text('Kategoria', categoryX, tableTop)
-           .text('Kwota brutto', amountX, tableTop, { align: 'right' });
+           .text('Waluta', currencyX, tableTop)
+           .text('Brutto', amountX, tableTop, { align: 'right' });
 
         // Linia pod nagłówkami
-        doc.moveTo(itemX, tableTop + 15).lineTo(amountX + 100, tableTop + 15).stroke();
+        doc.moveTo(itemX, tableTop + 15).lineTo(amountX + 60, tableTop + 15).stroke();
         
         let currentY = tableTop + 25;
+        const drawHeaderRow = () => {
+            doc.fontSize(10)
+               .text('Nr faktury', itemX, currentY)
+               .text('Data', dateX, currentY)
+               .text('Sprzedawca', sellerX, currentY)
+               .text('Nabywca', buyerX, currentY)
+               .text('Kategoria', categoryX, currentY)
+               .text('Waluta', currencyX, currentY)
+               .text('Brutto', amountX, currentY, { align: 'right' });
+            doc.moveTo(itemX, currentY + 15).lineTo(amountX + 60, currentY + 15).stroke();
+            currentY += 25;
+        };
+
+        const maxY = doc.page.height - doc.page.margins.bottom - 20;
         rows.forEach(inv => {
             doc.fontSize(9)
-               .text(inv.invoice_number, itemX, currentY)
-               .text(new Date(inv.issue_date).toLocaleDateString('pl-PL'), dateX, currentY)
+               .text(inv.invoice_number || '-', itemX, currentY)
+               .text(inv.issue_date ? new Date(inv.issue_date).toLocaleDateString('pl-PL') : '-', dateX, currentY)
+               .text(inv.seller_name || '-', sellerX, currentY)
+               .text(inv.buyer_name || '-', buyerX, currentY)
                .text(inv.category_name || 'Brak', categoryX, currentY)
-               .text(`${parseFloat(inv.total_gross_amount).toFixed(2)} zł`, amountX, currentY, { align: 'right' });
+               .text(inv.currency || 'PLN', currencyX, currentY)
+               .text(`${(parseFloat(inv.total_gross_amount) || 0).toFixed(2)} zł`, amountX, currentY, { align: 'right' });
             currentY += 20;
+
+            if (currentY > maxY) {
+                doc.addPage();
+                currentY = 50;
+                drawHeaderRow();
+            }
         });
 
         doc.end();
@@ -812,21 +1120,65 @@ app.post('/api/ksef/import-invoice', verifyToken, async (req, res) => {
 
         // Zapisz fakturę i jej pozycje w transakcji
         await connection.beginTransaction();
-        const invoiceSql = 'INSERT INTO invoices (user_id, invoice_number, issue_date, seller_nip, buyer_nip, total_net_amount, total_vat_amount, total_gross_amount, month_year) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)';
+        const invoiceSql = 'INSERT INTO invoices (user_id, invoice_number, issue_date, delivery_date, seller_nip, buyer_nip, seller_name, buyer_name, total_net_amount, total_vat_amount, total_gross_amount, currency, day_month_year, payment_status, payment_due_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
         const [invoiceResult] = await connection.execute(invoiceSql, [
-            req.userId, invoiceData.invoice_number, invoiceData.issue_date, invoiceData.seller_nip, 
-            invoiceData.buyer_nip, invoiceData.total_net_amount, invoiceData.total_vat_amount, 
-            invoiceData.total_gross_amount, invoiceData.month_year
+            req.userId,
+            invoiceData.invoice_number,
+            invoiceData.issue_date,
+            invoiceData.delivery_date || null,
+            invoiceData.seller_nip,
+            invoiceData.buyer_nip,
+            invoiceData.seller_name || null,
+            invoiceData.buyer_name || null,
+            invoiceData.total_net_amount,
+            invoiceData.total_vat_amount,
+            invoiceData.total_gross_amount,
+            invoiceData.currency || 'PLN',
+            invoiceData.day_month_year,
+            'niezapłacona',
+            null
         ]);
         const invoiceId = invoiceResult.insertId;
 
         if (itemsData && itemsData.length > 0) {
-            const itemsSql = 'INSERT INTO invoice_items (invoice_id, description, quantity, unit_price_net, vat_rate, total_net_amount, total_vat_amount, total_gross_amount) VALUES ?';
+            const itemsSql = 'INSERT INTO invoice_items (invoice_id, description, quantity, unit, catalog_number, unit_price_net, vat_rate, total_net_amount, total_vat_amount, total_gross_amount) VALUES ?';
             const itemsValues = itemsData.map(item => [
-                invoiceId, item.description, item.quantity, item.unit_price_net, item.vat_rate, 
-                item.total_net_amount, item.total_vat_amount, item.total_gross_amount
+                invoiceId,
+                item.description,
+                item.quantity,
+                item.unit || null,
+                item.catalog_number || null,
+                item.unit_price_net,
+                item.vat_rate,
+                item.total_net_amount,
+                item.total_vat_amount,
+                item.total_gross_amount
             ]);
             await connection.query(itemsSql, [itemsValues]);
+
+            // Dodaj rozbicie VAT per stawka na podstawie pozycji
+            const breakdownMap = new Map();
+            for (const it of itemsData) {
+                const rateKey = (it.vat_rate || '').toString();
+                if (!breakdownMap.has(rateKey)) {
+                    breakdownMap.set(rateKey, { net: 0, vat: 0, gross: 0 });
+                }
+                const agg = breakdownMap.get(rateKey);
+                agg.net += Number(it.total_net_amount || 0);
+                agg.vat += Number(it.total_vat_amount || 0);
+                agg.gross += Number(it.total_gross_amount || 0);
+            }
+            if (breakdownMap.size > 0) {
+                const vatSql = 'INSERT INTO invoice_vat_breakdown (invoice_id, vat_rate, net_amount, vat_amount, gross_amount) VALUES ?';
+                const vatValues = Array.from(breakdownMap.entries()).map(([rate, amounts]) => [
+                    invoiceId,
+                    rate,
+                    amounts.net,
+                    amounts.vat,
+                    amounts.gross
+                ]);
+                await connection.query(vatSql, [vatValues]);
+            }
         }
 
         await connection.commit();
@@ -846,4 +1198,69 @@ app.post('/api/ksef/import-invoice', verifyToken, async (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`Serwer backendu działa na porcie ${PORT}`);
+});
+// Utworzenie faktury przez API (manualne dodanie)
+app.post('/api/invoices', verifyToken, async (req, res) => {
+    const {
+        invoice_number,
+        issue_date,
+        delivery_date,
+        seller_nip,
+        buyer_nip,
+        seller_name,
+        buyer_name,
+        total_net_amount,
+        total_vat_amount,
+        total_gross_amount,
+        currency,
+        payment_method,
+        bank_account,
+        payment_date,
+        payment_status,
+        payment_due_date
+    } = req.body;
+
+    if (!invoice_number || !issue_date || !total_gross_amount) {
+        return res.status(400).json({ message: 'Brak wymaganych danych (numer faktury, data, kwota brutto).' });
+    }
+
+    const date = new Date(issue_date);
+    const day_month_year = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
+
+    try {
+        const connection = await mysql.createConnection(dbConfig);
+        const sql = `
+            INSERT INTO invoices (
+                user_id, invoice_number, issue_date, delivery_date, seller_nip, buyer_nip, seller_name, buyer_name,
+                total_net_amount, total_vat_amount, total_gross_amount, currency, day_month_year, payment_method,
+                bank_account, payment_date, payment_status, payment_due_date, notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+        const [result] = await connection.execute(sql, [
+            req.userId,
+            invoice_number,
+            issue_date,
+            delivery_date || null,
+            seller_nip || null,
+            buyer_nip || null,
+            seller_name || null,
+            buyer_name || null,
+            total_net_amount || null,
+            total_vat_amount || null,
+            total_gross_amount,
+            currency || 'PLN',
+            day_month_year,
+            payment_method || null,
+            bank_account || null,
+            payment_date || null,
+            payment_status || null,
+            payment_due_date || null,
+            req.body.notes || null
+        ]);
+        await connection.end();
+        res.status(201).json({ id: result.insertId });
+    } catch (err) {
+        console.error('Błąd tworzenia faktury:', err);
+        res.status(500).json({ message: 'Błąd serwera podczas tworzenia faktury.' });
+    }
 });

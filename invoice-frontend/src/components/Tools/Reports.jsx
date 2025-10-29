@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import api from '../../api/axiosConfig';
+import Button from '../ui/Button';
 
 // Helper do pobierania plików
 const downloadFile = (blob, filename) => {
@@ -13,19 +14,19 @@ const downloadFile = (blob, filename) => {
 };
 
 const Reports = () => {
-    const [pdfMonthYear, setPdfMonthYear] = useState(
-        `${(new Date().getMonth() + 1).toString().padStart(2, '0')}/${new Date().getFullYear()}`
-    );
+    const today = new Date();
+    const defaultDayMonthYear = `${String(today.getDate()).padStart(2, '0')}/${String(today.getMonth() + 1).padStart(2, '0')}/${today.getFullYear()}`;
+    const [pdfDayMonthYear, setPdfDayMonthYear] = useState(defaultDayMonthYear);
     const [status, setStatus] = useState('');
 
     const handleGeneratePdf = async () => {
         setStatus('Generowanie raportu PDF...');
         try {
             const response = await api.get('/reports/pdf', {
-                params: { monthYear: pdfMonthYear },
+                params: { dayMonthYear: pdfDayMonthYear },
                 responseType: 'blob',
             });
-            const filename = `raport-${pdfMonthYear.replace('/', '-')}.pdf`;
+            const filename = `raport-${pdfDayMonthYear.replace(/\//g, '-')}.pdf`;
             downloadFile(response.data, filename);
             setStatus('Raport PDF został wygenerowany.');
         } catch (error) {
@@ -35,19 +36,22 @@ const Reports = () => {
     };
 
     return (
-        <div className="tools-section">
+        <div className="">
             <h3>Raporty</h3>
             <div className="tool-item">
-                <label>Raport PDF za miesiąc:</label>
+                <label>Raport PDF za dzień:</label>
                 <input
                     type="text"
-                    value={pdfMonthYear}
-                    onChange={(e) => setPdfMonthYear(e.target.value)}
-                    placeholder="MM/YYYY"
+                    value={pdfDayMonthYear}
+                    onChange={(e) => setPdfDayMonthYear(e.target.value)}
+                    placeholder="DD/MM/YYYY"
+                    className="rounded-md border border-slate-300 p-2 w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
-                <button onClick={handleGeneratePdf}>Generuj PDF</button>
+                <Button onClick={handleGeneratePdf} variant="primary" className="mt-2">Generuj PDF</Button>
             </div>
-            {status && <p className="tool-status">{status}</p>}
+            {status && (
+                <p className="mt-3 text-accent-700 bg-accent-50 border border-accent-200 rounded-md px-3 py-2 text-sm">{status}</p>
+            )}
         </div>
     );
 };

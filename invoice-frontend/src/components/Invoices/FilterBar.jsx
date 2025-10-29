@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import Button from '../ui/Button';
 
 /**
  * Komponent paska filtrów dla tabeli faktur.
@@ -51,9 +52,9 @@ const FilterBar = ({ categories, onFilterChange }) => {
     };
 
     return (
-        <div className="filter-bar">
+        <div className="flex flex-wrap gap-4 p-4 bg-slate-50 rounded-lg">
             {/* Filtr tekstowy */}
-            <div className="filter-group">
+            <div className="flex flex-col gap-1">
                 <label htmlFor="query">Wyszukaj</label>
                 <input
                     type="text"
@@ -62,12 +63,12 @@ const FilterBar = ({ categories, onFilterChange }) => {
                     placeholder="Nr faktury, NIP, nazwa..."
                     value={filters.query}
                     onChange={handleChange}
-                    className="filter-input-text"
+                    className="rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
             </div>
 
             {/* Filtr po dacie "od" */}
-            <div className="filter-group">
+            <div className="flex flex-col gap-1">
                 <label htmlFor="startDate">Data od</label>
                 <input
                     type="date"
@@ -75,12 +76,12 @@ const FilterBar = ({ categories, onFilterChange }) => {
                     name="startDate"
                     value={filters.startDate}
                     onChange={handleChange}
-                    className="filter-input-date"
+                    className="rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
             </div>
 
             {/* Filtr po dacie "do" */}
-            <div className="filter-group">
+            <div className="flex flex-col gap-1">
                 <label htmlFor="endDate">Data do</label>
                 <input
                     type="date"
@@ -88,19 +89,19 @@ const FilterBar = ({ categories, onFilterChange }) => {
                     name="endDate"
                     value={filters.endDate}
                     onChange={handleChange}
-                    className="filter-input-date"
+                    className="rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 />
             </div>
 
             {/* Filtr po kategorii */}
-            <div className="filter-group">
+            <div className="flex flex-col gap-1">
                 <label htmlFor="categoryId">Kategoria</label>
                 <select
                     id="categoryId"
                     name="categoryId"
                     value={filters.categoryId}
                     onChange={handleChange}
-                    className="filter-select"
+                    className="rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
                     <option value="all">Wszystkie kategorie</option>
                     {categories.map(cat => (
@@ -110,10 +111,8 @@ const FilterBar = ({ categories, onFilterChange }) => {
             </div>
 
             {/* Przycisk do resetowania filtrów */}
-            <div className="filter-group-action">
-                <button onClick={handleReset} className="btn-reset">
-                    Wyczyść filtry
-                </button>
+            <div className="flex items-end">
+                <Button onClick={handleReset} variant="outline">Wyczyść filtry</Button>
             </div>
         </div>
     );
