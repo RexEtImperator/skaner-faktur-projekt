@@ -9,7 +9,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "GPL-3.0",
   "dependencies": {
     "@google-cloud/vision": "^5.3.4",
     "axios": "^1.4.0",
