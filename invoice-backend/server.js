@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const mysql = require('mysql2/promise');
 const multer = require('multer');
@@ -11,6 +12,7 @@ const path = require('path');
 const { encrypt, decrypt } = require('./utils/crypto');
 const { mapKsefFaVatToDbModel } = require('./utils/ksefMapper');
 const KsefService = require('./services/ksefService');
+const { KsefError } = require('./utils/ksefErrorMapper');
 
 // Importy do przetwarzania faktur
 const pdf = require('pdf-parse');
@@ -22,7 +24,11 @@ const mysqldump = require('mysqldump');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'twoj_super_tajny_klucz_jwt_do_zmiany';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+    console.error('Brak wymaganego JWT_SECRET w zmiennych środowiskowych. Ustaw JWT_SECRET w pliku .env.');
+    process.exit(1);
+}
 
 // Konfiguracja połączenia z bazą danych MySQL
 const dbConfig = {
@@ -35,17 +41,22 @@ const dbConfig = {
 // Inicjalizacja klienta Google Vision (jeśli jest skonfigurowany)
 let visionClient;
 try {
-    visionClient = new ImageAnnotatorClient({ keyFilename: 'gcp-credentials.json' });
+    const keyFile = process.env.GOOGLE_APPLICATION_CREDENTIALS || 'gcp-credentials.json';
+    visionClient = new ImageAnnotatorClient({ keyFilename: keyFile });
 } catch (e) {
-    console.warn("Plik gcp-credentials.json nie został znaleziony. Silnik Google Vision będzie niedostępny.");
+    console.warn('Google Vision niedostępny. Ustaw GOOGLE_APPLICATION_CREDENTIALS w .env lub umieść gcp-credentials.json.');
 }
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// --- Konfiguracja Multer ---
+// Publiczny endpoint zdrowia serwera (bez autoryzacji)
+app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok' });
+});
 
+// --- Konfiguracja Multer ---
 // Przechowywanie wgrywanych faktur w pamięci
 const invoiceStorage = multer.memoryStorage();
 const invoiceUpload = multer({ storage: invoiceStorage });
@@ -546,7 +557,7 @@ app.get('/api/export', verifyToken, async (req, res) => {
         // Krok 2: Połączenie z bazą danych i pobranie odpowiednich danych.
         connection = await mysql.createConnection(dbConfig);
         const sql = `
-            SELECT i.invoice_number, i.issue_date, i.seller_nip, i.buyer_nip, i.gross_amount, c.name AS category_name
+            SELECT i.invoice_number, i.issue_date, i.seller_nip, i.buyer_nip, i.total_gross_amount, c.name AS category_name
             FROM invoices i
             LEFT JOIN categories c ON i.category_id = c.id
             WHERE i.user_id = ? AND i.month_year = ?
@@ -567,7 +578,7 @@ app.get('/api/export', verifyToken, async (req, res) => {
         descriptionSheet.addRow({ name: 'issue_date', desc: 'Data wystawienia faktury.' });
         descriptionSheet.addRow({ name: 'seller_nip', desc: 'Numer Identyfikacji Podatkowej (NIP) sprzedawcy.' });
         descriptionSheet.addRow({ name: 'buyer_nip', desc: 'Numer Identyfikacji Podatkowej (NIP) nabywcy.' });
-        descriptionSheet.addRow({ name: 'gross_amount', desc: 'Całkowita kwota brutto (z podatkiem VAT).' });
+        descriptionSheet.addRow({ name: 'total_gross_amount', desc: 'Całkowita kwota brutto (z podatkiem VAT).' });
         descriptionSheet.addRow({ name: 'category_name', desc: 'Kategoria wydatku przypisana w systemie.' });
         
         // --- Arkusz 2: Dane Faktur ---
@@ -578,7 +589,7 @@ app.get('/api/export', verifyToken, async (req, res) => {
             { header: 'NIP Sprzedawcy', key: 'seller_nip', width: 20 },
             { header: 'NIP Nabywcy', key: 'buyer_nip', width: 20 },
             { header: 'Kategoria', key: 'category_name', width: 25 },
-            { header: 'Kwota Brutto', key: 'gross_amount', width: 18, style: { numFmt: '#,##0.00 "zł"' } }
+            { header: 'Kwota Brutto', key: 'total_gross_amount', width: 18, style: { numFmt: '#,##0.00 "zł"' } }
         ];
 
         // Pogrubienie nagłówków
@@ -588,8 +599,7 @@ app.get('/api/export', verifyToken, async (req, res) => {
         rows.forEach(invoice => {
             worksheet.addRow({
                 ...invoice,
-                // Upewnij się, że kwota jest liczbą, aby formatowanie zadziałało
-                gross_amount: parseFloat(invoice.gross_amount) 
+                total_gross_amount: parseFloat(invoice.total_gross_amount)
             });
         });
 
@@ -631,7 +641,7 @@ app.get('/api/reports/pdf', verifyToken, async (req, res) => {
             ORDER BY issue_date ASC
         `;
         const [rows] = await connection.execute(sql, [req.userId, monthYear]);
-        const totalAmount = rows.reduce((sum, inv) => sum + parseFloat(inv.gross_amount), 0);
+        const totalAmount = rows.reduce((sum, inv) => sum + parseFloat(inv.total_gross_amount), 0);
         await connection.end();
 
         // Ustawienia nagłówków do pobrania pliku
@@ -671,7 +681,7 @@ app.get('/api/reports/pdf', verifyToken, async (req, res) => {
                .text(inv.invoice_number, itemX, currentY)
                .text(new Date(inv.issue_date).toLocaleDateString('pl-PL'), dateX, currentY)
                .text(inv.category_name || 'Brak', categoryX, currentY)
-               .text(`${parseFloat(inv.gross_amount).toFixed(2)} zł`, amountX, currentY, { align: 'right' });
+               .text(`${parseFloat(inv.total_gross_amount).toFixed(2)} zł`, amountX, currentY, { align: 'right' });
             currentY += 20;
         });
 
@@ -692,7 +702,7 @@ app.get('/api/backup/db', verifyToken, async (req, res) => {
         await mysqldump({
             connection: dbConfig,
             dump: {
-                schema: { tables: ['users', 'categories', 'invoices'] }, // Definiujemy, co ma być w backupie
+                schema: { tables: ['users', 'categories', 'invoices', 'invoice_items'] }, // Definiujemy, co ma być w backupie
                 data: true,
             },
             // UWAGA: Ta funkcja streamuje dane!
@@ -820,8 +830,6 @@ app.post('/api/ksef/import-invoice', verifyToken, async (req, res) => {
         }
 
         await connection.commit();
-
-        res.status(200).json({ message: 'Faktura została usunięta.' });
         res.status(201).json({ message: `Faktura ${invoiceData.invoice_number} została pomyślnie zaimportowana.` });
 
     } catch (error) {

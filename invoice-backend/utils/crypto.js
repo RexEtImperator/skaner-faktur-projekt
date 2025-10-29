@@ -8,6 +8,9 @@ const PBKDF2_ITERATIONS = 100000;
 
 // W produkcji, ten klucz MUSI być ustawiony jako zmienna środowiskowa!
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'sx8hV6iAvSj8jo3U5AOjAjJMaQDzFaXPdAVGvPo23SdsYRbODn0Wf5wDFGHj0+k99GY25YpJSfhg5ElxMX7ANQ==';
+if (!process.env.ENCRYPTION_KEY) {
+    console.warn('UWAGA: Brak ENCRYPTION_KEY w .env. Używany jest słaby klucz domyślny — ustaw ENCRYPTION_KEY w środowisku.');
+}
 
 const getKey = (salt) => {
     return crypto.pbkdf2Sync(ENCRYPTION_KEY, salt, PBKDF2_ITERATIONS, 32, 'sha512');

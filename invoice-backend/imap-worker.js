@@ -1,10 +1,16 @@
+require('dotenv').config();
 const mysql = require('mysql2/promise');
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
 const { decrypt } = require('./utils/crypto');
 
 // UWAGA: Konfiguracja DB i inne wrażliwe dane powinny pochodzić ze zmiennych środowiskowych
-const dbConfig = { host: 'localhost', user: 'root', password: '', database: 'invoice_parser' };
+const dbConfig = {
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || 'admin',
+    database: process.env.DB_NAME || 'invoice_parser'
+};
 
 // Symulacja funkcji, które byłyby w server.js
 const pdf = require('pdf-parse');

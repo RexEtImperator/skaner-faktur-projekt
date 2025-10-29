@@ -3,47 +3,62 @@ const get = (obj, path, defaultValue = null) => {
     return value && value._text ? value._text : defaultValue;
 };
 
+const toNumber = (val, fallback = 0) => {
+    const n = parseFloat(val);
+    return Number.isFinite(n) ? n : fallback;
+};
+
+const toMonthYear = (isoDate) => {
+    if (!isoDate) return null;
+    const d = new Date(isoDate);
+    if (Number.isNaN(d.getTime())) return null;
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = String(d.getFullYear());
+    return `${mm}/${yyyy}`;
+};
+
 exports.mapKsefFaVatToDbModel = (ksefJson) => {
-    const fa = ksefJson.Faktura.Fa;
-    const podmiot1 = ksefJson.Faktura.Podmiot1;
-    const podmiot2 = ksefJson.Faktura.Podmiot2;
+    const fa = ksefJson.Faktura?.Fa || {};
+    const podmiot1 = ksefJson.Faktura?.Podmiot1 || {};
+    const podmiot2 = ksefJson.Faktura?.Podmiot2 || {};
 
-    const invoice = {
-        ksefReferenceNumber: get(ksefJson.Faktura.Naglowek, 'NumerKSeF'),
-        invoiceNumber: get(fa, 'P_2'),
-        issueDate: get(fa, 'P_1'),
-        issuePlace: get(fa, 'P_1M'),
-        sellerName: get(podmiot1, 'DaneIdentyfikacyjne.Nazwa'),
-        sellerNip: get(podmiot1, 'DaneIdentyfikacyjne.NIP'),
-        sellerAddress: `${get(podmiot1.Adres, 'Ulica')} ${get(podmiot1.Adres, 'NrDomu')}, ${get(podmiot1.Adres, 'KodPocztowy')} ${get(podmiot1.Adres, 'Miejscowosc')}`,
-        buyerName: get(podmiot2, 'DaneIdentyfikacyjne.Nazwa'),
-        buyerNip: get(podmiot2, 'DaneIdentyfikacyjne.NIP'),
-        buyerAddress: `${get(podmiot2.Adres, 'Ulica')} ${get(podmiot2.Adres, 'NrDomu')}, ${get(podmiot2.Adres, 'KodPocztowy')} ${get(podmiot2.Adres, 'Miejscowosc')}`,
-        netAmount: parseFloat(get(fa, 'P_13_1', 0)),
-        vatAmount: parseFloat(get(fa, 'P_14_1', 0)),
-        grossAmount: parseFloat(get(fa, 'P_15', 0)),
-        currencyCode: get(fa, 'KodWaluty'),
-        paymentDueDate: get(fa, 'TerminPlatnosci'),
-        paymentType: get(fa, 'RodzajPlatnosci'),
-        accountNumber: get(fa, 'NumerKonta'),
-        items: []
+    const issueDate = get(fa, 'P_1');
+
+    const invoiceData = {
+        invoice_number: get(fa, 'P_2'),
+        issue_date: issueDate,
+        seller_nip: get(podmiot1, 'DaneIdentyfikacyjne.NIP'),
+        buyer_nip: get(podmiot2, 'DaneIdentyfikacyjne.NIP'),
+        total_net_amount: toNumber(get(fa, 'P_13_1', 0)),
+        total_vat_amount: toNumber(get(fa, 'P_14_1', 0)),
+        total_gross_amount: toNumber(get(fa, 'P_15', 0)),
+        month_year: toMonthYear(issueDate)
     };
-    
-    let wiersze = fa.FaWiersz;
-    if (wiersze && !Array.isArray(wiersze)) {
-        wiersze = [wiersze];
-    }
-    
-    if (wiersze) {
-        invoice.items = wiersze.map(w => ({
-            name: get(w, 'P_7'),
-            quantity: parseInt(get(w, 'P_8A', 1)),
-            unit: get(w, 'P_8B'),
-            netPrice: parseFloat(get(w, 'P_9A', 0)),
-            netValue: parseFloat(get(w, 'P_11', 0)),
-            vatRate: get(w, 'P_12'),
-        }));
+
+    let rows = fa.FaWiersz;
+    if (rows && !Array.isArray(rows)) {
+        rows = [rows];
     }
 
-    return invoice;
+    const itemsData = (rows || []).map(w => {
+        const description = get(w, 'P_7');
+        const quantity = toNumber(get(w, 'P_8A', 1), 1);
+        const unit_price_net = toNumber(get(w, 'P_9A', 0));
+        const total_net_amount = toNumber(get(w, 'P_11', 0));
+        const vat_rate_str = get(w, 'P_12');
+        const vat_rate_num = toNumber(vat_rate_str, 0);
+        const total_vat_amount = Number.isFinite(vat_rate_num) ? (total_net_amount * vat_rate_num / 100) : 0;
+        const total_gross_amount = total_net_amount + total_vat_amount;
+        return {
+            description,
+            quantity,
+            unit_price_net,
+            vat_rate: vat_rate_str,
+            total_net_amount,
+            total_vat_amount,
+            total_gross_amount
+        };
+    });
+
+    return { invoiceData, itemsData };
 };

@@ -4,7 +4,7 @@ import axios from 'axios';
 //    Wszystkie zapytania wysyłane przez 'api' będą domyślnie kierowane
 //    na adres 'http://localhost:3000/api'.
 const api = axios.create({
-    baseURL: 'http://localhost:3000/api',
+    baseURL: process.env.REACT_APP_API_URL || 'http://localhost:3000/api',
 });
 
 // 2. Konfiguracja "interceptora" dla zapytań wychodzących.

@@ -92,7 +92,7 @@ cd skaner-faktur-projekt
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
-    -- Tworzenie tabeli invoices
+    -- Tworzenie tabeli invoices (spójne z backendem)
     CREATE TABLE invoices (
         id INT AUTO_INCREMENT PRIMARY KEY,
         user_id INT NOT NULL,
@@ -101,13 +101,29 @@ cd skaner-faktur-projekt
         issue_date DATE,
         seller_nip VARCHAR(20),
         buyer_nip VARCHAR(20),
-        gross_amount DECIMAL(10, 2),
+        total_net_amount DECIMAL(10, 2),
+        total_vat_amount DECIMAL(10, 2),
+        total_gross_amount DECIMAL(10, 2),
         month_year VARCHAR(7) NOT NULL,
         payment_status ENUM('niezapłacona', 'zapłacona', 'po terminie') NOT NULL DEFAULT 'niezapłacona',
         payment_due_date DATE NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
         CONSTRAINT fk_category FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL
+    );
+
+    -- Tworzenie tabeli invoice_items
+    CREATE TABLE invoice_items (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        invoice_id INT NOT NULL,
+        description VARCHAR(255) NOT NULL,
+        quantity DECIMAL(10, 3) NOT NULL DEFAULT 1,
+        unit_price_net DECIMAL(10, 2) NOT NULL,
+        vat_rate VARCHAR(10) NOT NULL,
+        total_net_amount DECIMAL(10, 2) NOT NULL,
+        total_vat_amount DECIMAL(10, 2) NOT NULL,
+        total_gross_amount DECIMAL(10, 2) NOT NULL,
+        CONSTRAINT fk_invoice FOREIGN KEY (invoice_id) REFERENCES invoices(id) ON DELETE CASCADE
     );
     ```
 
@@ -132,7 +148,8 @@ cd skaner-faktur-projekt
     # Klucze bezpieczeństwa (użyj silnych, losowych wartości)
     JWT_SECRET=bardzo_tajny_klucz_do_tokenow_jwt_zmien_go
     ENCRYPTION_KEY=bardzo_dlugi_i_bezpieczny_klucz_do_szyfrowania_danych_tez_go_zmien
-    ```4.  **(Opcjonalnie)** Jeśli chcesz używać Google Cloud Vision, umieść swój plik z danymi uwierzytelniającymi w folderze `invoice-backend` pod nazwą `gcp-credentials.json`.
+    ```
+4.  **(Opcjonalnie)** Jeśli chcesz używać Google Cloud Vision, ustaw `GOOGLE_APPLICATION_CREDENTIALS` w `.env` (np. `./gcp-credentials.json`) lub umieść plik `gcp-credentials.json` w folderze `invoice-backend`.
 5.  **(Opcjonalnie)** Jeśli chcesz testować podpisywanie KSeF, umieść swój klucz prywatny w folderze `invoice-backend` pod nazwą `private_key.pem`.
 
 ### Krok 5: Konfiguracja Frontendu
@@ -143,6 +160,10 @@ cd skaner-faktur-projekt
     ```2.  Zainstaluj wszystkie zależności:
     ```bash
     npm install
+    ```
+3.  Skonfiguruj `.env` w `invoice-frontend` (adres API):
+    ```env
+    REACT_APP_API_URL=http://localhost:3000/api
     ```
 
 ### Krok 6: Uruchomienie Aplikacji
