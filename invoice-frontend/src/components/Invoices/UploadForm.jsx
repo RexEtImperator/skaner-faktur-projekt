@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import Button from '../ui/Button';
 import api from '../../api/axiosConfig';
+import OcrViewer from '../OCR/OcrViewer';
 
 /**
  * Komponent formularza do przesyłania nowych faktur.
@@ -44,6 +45,7 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
     const [previewData, setPreviewData] = useState(null);
     const [rawText, setRawText] = useState([]);
     const [showPreview, setShowPreview] = useState(false);
+    const [ocrWords, setOcrWords] = useState([]);
 
     /**
      * Obsługuje zmianę wartości w polach formularza (kategoria, status, data).
@@ -115,6 +117,7 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
         setPreviewData(null);
         setRawText([]);
         setShowPreview(false);
+        setOcrWords([]);
         // Pozostaw komunikat o sukcesie widoczny dla użytkownika
     };
 
@@ -141,11 +144,172 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
             const response = await api.post('/upload', uploadData);
             setPreviewData(response.data?.data || null);
             setRawText(response.data?.rawText || []);
+            setOcrWords(response.data?.ocr?.words || []);
             setShowPreview(true);
             setStatus({ message: 'Podgląd wygenerowany. Zweryfikuj i dostosuj pola.', type: 'success' });
         } catch (error) {
             const errorMessage = error.response?.data?.message || 'Wystąpił nieoczekiwany błąd.';
             setStatus({ message: `Błąd podglądu: ${errorMessage}`, type: 'error' });
+        }
+    };
+
+    // Normalizacja bbox z Document AI -> wartości znormalizowane (0..1)
+    const normalizeBBox = (poly = {}, pageDim = { width: 1, height: 1 }) => {
+        const verts = (poly.normalizedVertices && poly.normalizedVertices.length > 0)
+            ? poly.normalizedVertices
+            : poly.vertices;
+        if (!verts || verts.length === 0) return { x: 0, y: 0, w: 0, h: 0 };
+        const xs = verts.map(v => typeof v.x === 'number' ? v.x : 0);
+        const ys = verts.map(v => typeof v.y === 'number' ? v.y : 0);
+        let minX = Math.min(...xs), maxX = Math.max(...xs);
+        let minY = Math.min(...ys), maxY = Math.max(...ys);
+        // Jeśli współrzędne w pikselach, przelicz na [0..1]
+        const isPixels = maxX > 1 || maxY > 1;
+        if (isPixels) {
+            minX = minX / (pageDim.width || 1);
+            maxX = maxX / (pageDim.width || 1);
+            minY = minY / (pageDim.height || 1);
+            maxY = maxY / (pageDim.height || 1);
+        }
+        return { x: minX, y: minY, w: Math.max(0, maxX - minX), h: Math.max(0, maxY - minY) };
+    };
+
+    // Budowa listy "słów" dla OcrViewer na bazie bloków Document AI
+    const buildWordsFromDocAi = (doc) => {
+        const words = [];
+        const text = doc?.document?.text || '';
+        const pages = doc?.document?.pages || [];
+        pages.forEach(page => {
+            const dim = page?.dimension || { width: 1, height: 1 };
+            (page.blocks || []).forEach(block => {
+                const segs = block?.layout?.textAnchor?.textSegments || [];
+                const blockText = segs.map(s => {
+                    const start = Number(s.startIndex || 0);
+                    const end = Number(s.endIndex || 0);
+                    return text.slice(start, end);
+                }).join(' ').trim();
+                const bbox = normalizeBBox(block?.layout?.boundingPoly || {}, dim);
+                if (blockText) {
+                    // Traktuj cały tekst bloku jako jeden "token" OCR
+                    words.push({ text: blockText, bbox });
+                }
+            });
+        });
+        return words;
+    };
+
+    // Ekstrakcja najważniejszych pól z surowego tekstu
+    const extractFieldsFromDocAi = (doc) => {
+        const text = doc?.document?.text || '';
+        const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        const join = (arr, sep = ' ') => arr.filter(Boolean).join(sep);
+
+        const textAll = lines.join('\n');
+        const getMatch = (re) => {
+            const m = textAll.match(re);
+            return m ? m[1] : '';
+        };
+        const amount = (str) => {
+            if (!str) return '';
+            const m = String(str).match(/[\d.,]+/);
+            return m ? m[0].replace(/\./g, '').replace(',', '.') : '';
+        };
+        const dateNear = (anchorRegex) => {
+            const idx = lines.findIndex(l => anchorRegex.test(l));
+            const dateRe = /(\d{4}[./-]\d{2}[./-]\d{2}|\d{2}[./-]\d{2}[./-]\d{4})/;
+            if (idx >= 0) {
+                for (let i = idx; i < Math.min(lines.length, idx + 6); i++) {
+                    const m = lines[i].match(dateRe);
+                    if (m) return m[1].replace(/\./g, '-').replace(/\//g, '-');
+                }
+            }
+            const any = textAll.match(dateRe);
+            return any ? any[1].replace(/\./g, '-').replace(/\//g, '-') : '';
+        };
+
+        // Sprzedawca: po anchorze "Sprzedawca" do następnego znacznika sekcji
+        const sellerIdx = lines.findIndex(l => /sprzedawca/i.test(l));
+        let sellerLines = [];
+        if (sellerIdx >= 0) {
+            for (let i = sellerIdx + 1; i < Math.min(lines.length, sellerIdx + 6); i++) {
+                if (/faktura\s+vat/i.test(lines[i])) break;
+                sellerLines.push(lines[i]);
+            }
+        }
+        const sellerName = sellerLines[0] || getMatch(/sprzedawca\s*\n?([^\n]+)/i);
+        const sellerAddress = join(sellerLines.slice(1, 3));
+
+        // Nabywca
+        const buyerIdx = lines.findIndex(l => /nabywca/i.test(l));
+        let buyerName = '';
+        let buyerAddress = '';
+        if (buyerIdx >= 0) {
+            buyerName = lines[buyerIdx + 1] || '';
+            buyerAddress = join([lines[buyerIdx + 2], lines[buyerIdx + 3]]);
+        }
+
+        // Różne pola
+        const invoiceNumber = getMatch(/\bnr\s*([A-Za-z0-9\/\-]+)/i);
+        const sellerNIP = getMatch(/\bNIP[:\s]*([0-9\-]+)/i);
+        const bdoNumber = getMatch(/Numer\s+BDO[:\s]*([0-9]+)/i);
+        const bankAccount = getMatch(/Nr\s+rachunku[:\s]*([0-9\- ]{8,})/i).replace(/\s+/g, ' ').trim();
+        const paymentMethod = getMatch(/Forma\s+płatności\s*([A-ZŁŚŻĆÓŃ]+[A-Za-z\s\-]+)/i) || (lines.find(l => /PAYU/i.test(l)) ? 'PAYU' : '');
+        const paymentDate = dateNear(/\bTermin\b/i);
+
+        // Daty
+        const issueDate = dateNear(/Data\s+wystawienia/i);
+        const deliveryDate = dateNear(/Data\s+dostawy|wykonania\s+usługi/i);
+
+        // Suma
+        const totalGrossAmount = amount(getMatch(/Razem\s+do\s+zapłaty[\s\S]*?(\d+[\d,.]*\s*PLN)/i)) || amount(getMatch(/Brutto\s*(\d+[\d,.]*)/i));
+        const totalNetAmount = amount(getMatch(/Netto\s*(\d+[\d,.]*)/i));
+        const totalVatAmount = amount(getMatch(/VAT\s*(\d+[\d,.]*)/i));
+        const currency = (textAll.match(/PLN|EUR|USD/) || ['PLN'])[0];
+
+        const trackingNumber = getMatch(/Nr\s+listu\s+przewozowego[:\s]*([A-Za-z0-9]+)/i);
+        const amountInWords = getMatch(/Słownie:\s*([^\n]+)/i);
+
+        return {
+            invoiceNumber,
+            issueDate,
+            deliveryDate,
+            sellerName,
+            sellerNIP,
+            sellerAddress,
+            buyerName,
+            buyerNIP: '',
+            buyerAddress,
+            totalNetAmount,
+            totalVatAmount,
+            totalGrossAmount,
+            sellerBankAccount: bankAccount,
+            bankAccount,
+            currency,
+            paymentMethod,
+            paymentDate,
+            amountInWords,
+            trackingNumber,
+            bdoNumber
+        };
+    };
+
+    // Wczytaj i przetwórz lokalny plik response.json z zewnętrznego OCR
+    const handleLoadResponseJson = async () => {
+        setStatus({ message: 'Wczytywanie danych z response.json...', type: 'info' });
+        try {
+            // Dynamiczny import JSON z root projektu
+            const mod = await import('../../../response.json');
+            const doc = mod?.default || mod;
+            const rawLines = (doc?.document?.text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+            const words = buildWordsFromDocAi(doc);
+            const pd = extractFieldsFromDocAi(doc);
+            setPreviewData(pd);
+            setRawText(rawLines);
+            setOcrWords(words);
+            setShowPreview(true);
+            setStatus({ message: 'Załadowano response.json. Zweryfikuj i dostosuj pola.', type: 'success' });
+        } catch (err) {
+            setStatus({ message: 'Nie udało się wczytać response.json. Upewnij się, że plik istnieje w katalogu projektu.', type: 'error' });
         }
     };
 
@@ -197,6 +361,115 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
         }
     };
 
+    // Buduje listę pól do OcrViewer na podstawie danych z podglądu
+    const buildFieldsFromPreview = (pd) => {
+        if (!pd) return [];
+
+        const labelMap = {
+            invoiceNumber: 'Numer faktury',
+            issueDate: 'Data wystawienia faktury',
+            deliveryDate: 'Data sprzedaży',
+            sellerName: 'Sprzedawca',
+            sellerNIP: 'NIP sprzedawcy',
+            sellerAddress: 'Adres sprzedawcy',
+            buyerName: 'Nabywca',
+            buyerNIP: 'NIP nabywcy',
+            buyerAddress: 'Adres nabywcy',
+            totalNetAmount: 'Suma netto',
+            totalVatAmount: 'Suma VAT',
+            totalGrossAmount: 'Suma brutto',
+            bankAccount: 'Konto bankowe',
+            sellerBankAccount: 'Konto bankowe',
+            currency: 'Waluta',
+            paymentMethod: 'Forma płatności',
+            paymentDate: 'Termin płatności',
+            amountInWords: 'Słownie',
+            trackingNumber: 'Nr listu przewozowego',
+            dayMonthYear: 'Dzień/Miesiąc/Rok',
+            mppRequired: 'MPP wymagane',
+            bdoNumber: 'Numer BDO'
+        };
+
+        const fields = [];
+        const usedKeys = new Set();
+
+        const pushIf = (key, id, label, value) => {
+            if (typeof value !== 'undefined' && value !== null && value !== '') {
+                fields.push({ id, label, value });
+                usedKeys.add(key);
+            }
+        };
+
+        pushIf('invoiceNumber', 'invoiceNumber', labelMap.invoiceNumber, pd.invoiceNumber);
+        pushIf('issueDate', 'issueDate', labelMap.issueDate, pd.issueDate);
+        pushIf('deliveryDate', 'deliveryDate', labelMap.deliveryDate, pd.deliveryDate);
+        pushIf('sellerName', 'sellerName', labelMap.sellerName, pd.sellerName);
+        pushIf('sellerNIP', 'sellerNIP', labelMap.sellerNIP, pd.sellerNIP);
+        pushIf('sellerAddress', 'sellerAddress', labelMap.sellerAddress, pd.sellerAddress);
+        pushIf('buyerName', 'buyerName', labelMap.buyerName, pd.buyerName);
+        pushIf('buyerNIP', 'buyerNIP', labelMap.buyerNIP, pd.buyerNIP);
+        pushIf('buyerAddress', 'buyerAddress', labelMap.buyerAddress, pd.buyerAddress);
+        pushIf('totalNetAmount', 'totalNetAmount', labelMap.totalNetAmount, pd.totalNetAmount);
+        pushIf('totalVatAmount', 'totalVatAmount', labelMap.totalVatAmount, pd.totalVatAmount);
+        pushIf('totalGrossAmount', 'totalGrossAmount', labelMap.totalGrossAmount, pd.totalGrossAmount);
+        // Konto bankowe może być w dwóch kluczach
+        const bankVal = pd.sellerBankAccount || pd.bankAccount;
+        if (typeof bankVal !== 'undefined' && bankVal !== null && bankVal !== '') {
+            fields.push({ id: 'bankAccount', label: labelMap.bankAccount, value: bankVal });
+            if (pd.sellerBankAccount) usedKeys.add('sellerBankAccount');
+            if (pd.bankAccount) usedKeys.add('bankAccount');
+        }
+        pushIf('currency', 'currency', labelMap.currency, pd.currency);
+        pushIf('paymentMethod', 'paymentMethod', labelMap.paymentMethod, pd.paymentMethod);
+        pushIf('paymentDate', 'paymentDate', labelMap.paymentDate, pd.paymentDate);
+        pushIf('amountInWords', 'amountInWords', labelMap.amountInWords, pd.amountInWords);
+        pushIf('trackingNumber', 'trackingNumber', labelMap.trackingNumber, pd.trackingNumber);
+        pushIf('dayMonthYear', 'dayMonthYear', labelMap.dayMonthYear, pd.dayMonthYear);
+        pushIf('bdoNumber', 'bdoNumber', labelMap.bdoNumber, pd.bdoNumber);
+        if (typeof pd.mppRequired !== 'undefined' && pd.mppRequired !== null) {
+            fields.push({ id: 'mppRequired', label: labelMap.mppRequired, value: pd.mppRequired ? 'tak' : 'nie' });
+            usedKeys.add('mppRequired');
+        }
+
+        // Spłaszcz pozycje (items) do listy pól, obsłuż camelCase i snake_case w atrybutach
+        if (Array.isArray(pd.items)) {
+            pd.items.forEach((it, idx) => {
+                const n = idx + 1;
+                const desc = it.description || it.name || it.desc;
+                const qty = it.quantity || it.qty;
+                const unit = it.unit || it.jm;
+                const unitNet = it.unit_price_net || it.net_unit_price;
+                const net = it.total_net_amount || it.net_amount || it.net;
+                const vatRate = it.vat_rate || it.vatRate;
+                const vat = it.total_vat_amount || it.vat_amount || it.vat;
+                const gross = it.total_gross_amount || it.gross_amount || it.gross;
+                const discount = it.discount_percent || it.discountPercent || it.discount;
+
+                fields.push({ id: `item-${idx}-desc`, label: `Pozycja ${n} — Nazwa`, value: desc });
+                if (qty) fields.push({ id: `item-${idx}-qty`, label: `Pozycja ${n} — Ilość`, value: qty });
+                if (unit) fields.push({ id: `item-${idx}-unit`, label: `Pozycja ${n} — JM`, value: unit });
+                if (unitNet) fields.push({ id: `item-${idx}-unit-net`, label: `Pozycja ${n} — Cena netto`, value: unitNet });
+                if (net) fields.push({ id: `item-${idx}-net`, label: `Pozycja ${n} — Wartość netto`, value: net });
+                if (vatRate) fields.push({ id: `item-${idx}-vat-rate`, label: `Pozycja ${n} — Stawka VAT`, value: vatRate });
+                if (vat) fields.push({ id: `item-${idx}-vat`, label: `Pozycja ${n} — Wartość VAT`, value: vat });
+                if (gross) fields.push({ id: `item-${idx}-gross`, label: `Pozycja ${n} — Wartość brutto`, value: gross });
+                if (discount) fields.push({ id: `item-${idx}-discount`, label: `Pozycja ${n} — Rabat (%)`, value: discount });
+            });
+            usedKeys.add('items');
+        }
+
+        // Dodaj pozostałe wykryte klucze z pd, które nie zostały przypisane do żadnego pola
+        Object.entries(pd).forEach(([key, val]) => {
+            if (key === 'items') return;
+            const value = val;
+            if (!usedKeys.has(key) && typeof value !== 'undefined' && value !== null && value !== '') {
+                fields.push({ id: key, label: labelMap[key] || key, value, unmatched: true });
+            }
+        });
+
+        return fields.filter(f => typeof f.value !== 'undefined' && f.value !== null && f.value !== '');
+    };
+
 
     return (
         <div className="upload-section mt-6">
@@ -217,13 +490,20 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                     <label htmlFor="file-input" className="file-label inline-block px-3 py-2 bg-slate-700 text-white rounded hover:bg-slate-600 cursor-pointer">
                         {file ? `Wybrano plik: ${file.name}` : 'Kliknij, aby wybrać plik lub upuść go tutaj'}
                     </label>
-                    {previewSrc && <img src={previewSrc} alt="Podgląd" className="preview-image"/>}
+                    {previewSrc && !showPreview && (<img src={previewSrc} alt="Podgląd" className="preview-image"/>) }
+                    {showPreview && (
+                        <div className="mt-4">
+                            <OcrViewer imageUrl={previewSrc} fields={buildFieldsFromPreview(previewData)} words={ocrWords} rawLines={rawText} defaultTab="raw" overlayMode="words_only" />
+                        </div>
+                    )}
                 </div>
 
+                {showPreview && (
                 <div className="upload-options grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
                     <div className="form-group">
                         <label htmlFor="category_id">Kategoria (opcjonalnie)</label>
                         <select
+                            id="category_id"
                             name="category_id"
                             value={formData.category_id}
                             onChange={handleInputChange}
@@ -238,6 +518,7 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                     <div className="form-group">
                         <label htmlFor="payment_status">Status Płatności</label>
                         <select
+                            id="payment_status"
                             name="payment_status"
                             value={formData.payment_status}
                             onChange={handleInputChange}
@@ -251,6 +532,7 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                         <label htmlFor="payment_due_date">Termin Płatności (opcjonalnie)</label>
                         <input
                             type="date"
+                            id="payment_due_date"
                             name="payment_due_date"
                             value={formData.payment_due_date}
                             onChange={handleInputChange}
@@ -258,8 +540,10 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                         />
                     </div>
                 </div>
+                )}
 
                 {/* Wszystkie pola do dopasowania i kopiowania z wykrytych wartości */}
+                {showPreview && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
                     {/* NIP sprzedawcy */}
                     <div className="form-group">
@@ -274,20 +558,17 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                                 onChange={handleInputChange}
                                 className="w-full rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
-                            {previewData?.sellerNIP && (
-                                <button
-                                    type="button"
-                                    className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300"
-                                    onClick={() => setFormData(prev => ({ ...prev, seller_nip: previewData.sellerNIP }))}
-                                    title={`Wykryto: ${previewData.sellerNIP}`}
-                                >
-                                    Wstaw wykryty
-                                </button>
-                            )}
+                            <button
+                                type="button"
+                                className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                onClick={() => setFormData(prev => ({ ...prev, seller_nip: previewData?.sellerNIP }))}
+                                title={previewData?.sellerNIP ? `Wykryto: ${previewData.sellerNIP}` : 'Brak wykrytej wartości'}
+                                disabled={!previewData?.sellerNIP}
+                            >
+                                Wstaw wykryty
+                            </button>
                         </div>
-                        {previewData?.sellerNIP && (
-                            <p className="text-xs text-slate-600 mt-1">Wykryty NIP: {previewData.sellerNIP}</p>
-                        )}
+                        <p className="text-xs text-slate-600 mt-1">Wykryty NIP: {previewData?.sellerNIP || 'Nie wykryto'}</p>
                     </div>
 
                     {/* NIP nabywcy */}
@@ -303,20 +584,17 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                                 onChange={handleInputChange}
                                 className="w-full rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
-                            {previewData?.buyerNIP && (
-                                <button
-                                    type="button"
-                                    className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300"
-                                    onClick={() => setFormData(prev => ({ ...prev, buyer_nip: previewData.buyerNIP }))}
-                                    title={`Wykryto: ${previewData.buyerNIP}`}
-                                >
-                                    Wstaw wykryty
-                                </button>
-                            )}
+                            <button
+                                type="button"
+                                className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                onClick={() => setFormData(prev => ({ ...prev, buyer_nip: previewData?.buyerNIP }))}
+                                title={previewData?.buyerNIP ? `Wykryto: ${previewData.buyerNIP}` : 'Brak wykrytej wartości'}
+                                disabled={!previewData?.buyerNIP}
+                            >
+                                Wstaw wykryty
+                            </button>
                         </div>
-                        {previewData?.buyerNIP && (
-                            <p className="text-xs text-slate-600 mt-1">Wykryty NIP: {previewData.buyerNIP}</p>
-                        )}
+                        <p className="text-xs text-slate-600 mt-1">Wykryty NIP: {previewData?.buyerNIP || 'Nie wykryto'}</p>
                     </div>
 
                     {/* Numer faktury */}
@@ -331,20 +609,17 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                                 onChange={handleInputChange}
                                 className="w-full rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
-                            {previewData?.invoiceNumber && (
-                                <button
-                                    type="button"
-                                    className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300"
-                                    onClick={() => setFormData(prev => ({ ...prev, invoice_number: previewData.invoiceNumber }))}
-                                    title={`Wykryto: ${previewData.invoiceNumber}`}
-                                >
-                                    Wstaw wykryty
-                                </button>
-                            )}
+                            <button
+                                type="button"
+                                className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                onClick={() => setFormData(prev => ({ ...prev, invoice_number: previewData?.invoiceNumber }))}
+                                title={previewData?.invoiceNumber ? `Wykryto: ${previewData.invoiceNumber}` : 'Brak wykrytej wartości'}
+                                disabled={!previewData?.invoiceNumber}
+                            >
+                                Wstaw wykryty
+                            </button>
                         </div>
-                        {previewData?.invoiceNumber && (
-                            <p className="text-xs text-slate-600 mt-1">Wykryty numer: {previewData.invoiceNumber}</p>
-                        )}
+                        <p className="text-xs text-slate-600 mt-1">Wykryty numer: {previewData?.invoiceNumber || 'Nie wykryto'}</p>
                     </div>
 
                     {/* Data wystawienia */}
@@ -359,20 +634,17 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                                 onChange={handleInputChange}
                                 className="w-full rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
-                            {previewData?.issueDate && (
-                                <button
-                                    type="button"
-                                    className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300"
-                                    onClick={() => setFormData(prev => ({ ...prev, issue_date: previewData.issueDate }))}
-                                    title={`Wykryto: ${previewData.issueDate}`}
-                                >
-                                    Wstaw wykryty
-                                </button>
-                            )}
+                            <button
+                                type="button"
+                                className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                onClick={() => setFormData(prev => ({ ...prev, issue_date: previewData?.issueDate }))}
+                                title={previewData?.issueDate ? `Wykryto: ${previewData.issueDate}` : 'Brak wykrytej wartości'}
+                                disabled={!previewData?.issueDate}
+                            >
+                                Wstaw wykryty
+                            </button>
                         </div>
-                        {previewData?.issueDate && (
-                            <p className="text-xs text-slate-600 mt-1">Wykryta data: {previewData.issueDate}</p>
-                        )}
+                        <p className="text-xs text-slate-600 mt-1">Wykryta data: {previewData?.issueDate || 'Nie wykryto'}</p>
                     </div>
 
                     {/* Data dostawy */}
@@ -387,20 +659,17 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                                 onChange={handleInputChange}
                                 className="w-full rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
-                            {previewData?.deliveryDate && (
-                                <button
-                                    type="button"
-                                    className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300"
-                                    onClick={() => setFormData(prev => ({ ...prev, delivery_date: previewData.deliveryDate }))}
-                                    title={`Wykryto: ${previewData.deliveryDate}`}
-                                >
-                                    Wstaw wykryty
-                                </button>
-                            )}
+                            <button
+                                type="button"
+                                className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                onClick={() => setFormData(prev => ({ ...prev, delivery_date: previewData?.deliveryDate }))}
+                                title={previewData?.deliveryDate ? `Wykryto: ${previewData.deliveryDate}` : 'Brak wykrytej wartości'}
+                                disabled={!previewData?.deliveryDate}
+                            >
+                                Wstaw wykryty
+                            </button>
                         </div>
-                        {previewData?.deliveryDate && (
-                            <p className="text-xs text-slate-600 mt-1">Wykryta data dostawy: {previewData.deliveryDate}</p>
-                        )}
+                        <p className="text-xs text-slate-600 mt-1">Wykryta data dostawy: {previewData?.deliveryDate || 'Nie wykryto'}</p>
                     </div>
 
                     {/* Nazwa sprzedawcy */}
@@ -472,20 +741,17 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                                 onChange={handleInputChange}
                                 className="w-full rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
-                            {previewData?.bankAccount && (
-                                <button
-                                    type="button"
-                                    className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300"
-                                    onClick={() => setFormData(prev => ({ ...prev, seller_bank_account: previewData.bankAccount }))}
-                                    title={`Wykryto: ${previewData.bankAccount}`}
-                                >
-                                    Wstaw wykryty
-                                </button>
-                            )}
+                            <button
+                                type="button"
+                                className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                onClick={() => setFormData(prev => ({ ...prev, seller_bank_account: previewData?.bankAccount }))}
+                                title={previewData?.bankAccount ? `Wykryto: ${previewData.bankAccount}` : 'Brak wykrytej wartości'}
+                                disabled={!previewData?.bankAccount}
+                            >
+                                Wstaw wykryty
+                            </button>
                         </div>
-                        {previewData?.bankAccount && (
-                            <p className="text-xs text-slate-600 mt-1">Wykryty rachunek: {previewData.bankAccount}</p>
-                        )}
+                        <p className="text-xs text-slate-600 mt-1">Wykryty rachunek: {previewData?.bankAccount || 'Nie wykryto'}</p>
                     </div>
 
                     {/* Suma netto */}
@@ -501,20 +767,17 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                                 onChange={handleInputChange}
                                 className="w-full rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
-                            {previewData?.totalNetAmount && (
-                                <button
-                                    type="button"
-                                    className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300"
-                                    onClick={() => setFormData(prev => ({ ...prev, total_net_amount: previewData.totalNetAmount }))}
-                                    title={`Wykryto: ${previewData.totalNetAmount}`}
-                                >
-                                    Wstaw wykryty
-                                </button>
-                            )}
+                            <button
+                                type="button"
+                                className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                onClick={() => setFormData(prev => ({ ...prev, total_net_amount: previewData?.totalNetAmount }))}
+                                title={previewData?.totalNetAmount ? `Wykryto: ${previewData.totalNetAmount}` : 'Brak wykrytej wartości'}
+                                disabled={!previewData?.totalNetAmount}
+                            >
+                                Wstaw wykryty
+                            </button>
                         </div>
-                        {previewData?.totalNetAmount && (
-                            <p className="text-xs text-slate-600 mt-1">Wykryta kwota netto: {previewData.totalNetAmount}</p>
-                        )}
+                        <p className="text-xs text-slate-600 mt-1">Wykryta kwota netto: {previewData?.totalNetAmount || 'Nie wykryto'}</p>
                     </div>
 
                     {/* Suma VAT */}
@@ -530,20 +793,17 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                                 onChange={handleInputChange}
                                 className="w-full rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
-                            {previewData?.totalVatAmount && (
-                                <button
-                                    type="button"
-                                    className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300"
-                                    onClick={() => setFormData(prev => ({ ...prev, total_vat_amount: previewData.totalVatAmount }))}
-                                    title={`Wykryto: ${previewData.totalVatAmount}`}
-                                >
-                                    Wstaw wykryty
-                                </button>
-                            )}
+                            <button
+                                type="button"
+                                className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                onClick={() => setFormData(prev => ({ ...prev, total_vat_amount: previewData?.totalVatAmount }))}
+                                title={previewData?.totalVatAmount ? `Wykryto: ${previewData.totalVatAmount}` : 'Brak wykrytej wartości'}
+                                disabled={!previewData?.totalVatAmount}
+                            >
+                                Wstaw wykryty
+                            </button>
                         </div>
-                        {previewData?.totalVatAmount && (
-                            <p className="text-xs text-slate-600 mt-1">Wykryta kwota VAT: {previewData.totalVatAmount}</p>
-                        )}
+                        <p className="text-xs text-slate-600 mt-1">Wykryta kwota VAT: {previewData?.totalVatAmount || 'Nie wykryto'}</p>
                     </div>
 
                     {/* Suma brutto */}
@@ -559,20 +819,17 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                                 onChange={handleInputChange}
                                 className="w-full rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
-                            {previewData?.totalGrossAmount && (
-                                <button
-                                    type="button"
-                                    className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300"
-                                    onClick={() => setFormData(prev => ({ ...prev, total_gross_amount: previewData.totalGrossAmount }))}
-                                    title={`Wykryto: ${previewData.totalGrossAmount}`}
-                                >
-                                    Wstaw wykryty
-                                </button>
-                            )}
+                            <button
+                                type="button"
+                                className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                onClick={() => setFormData(prev => ({ ...prev, total_gross_amount: previewData?.totalGrossAmount }))}
+                                title={previewData?.totalGrossAmount ? `Wykryto: ${previewData.totalGrossAmount}` : 'Brak wykrytej wartości'}
+                                disabled={!previewData?.totalGrossAmount}
+                            >
+                                Wstaw wykryty
+                            </button>
                         </div>
-                        {previewData?.totalGrossAmount && (
-                            <p className="text-xs text-slate-600 mt-1">Wykryta kwota brutto: {previewData.totalGrossAmount}</p>
-                        )}
+                        <p className="text-xs text-slate-600 mt-1">Wykryta kwota brutto: {previewData?.totalGrossAmount || 'Nie wykryto'}</p>
                     </div>
 
                     {/* Forma płatności */}
@@ -616,20 +873,17 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                                 onChange={handleInputChange}
                                 className="w-full rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             />
-                            {previewData?.paymentDate && (
-                                <button
-                                    type="button"
-                                    className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300"
-                                    onClick={() => setFormData(prev => ({ ...prev, payment_date: previewData.paymentDate }))}
-                                    title={`Wykryto: ${previewData.paymentDate}`}
-                                >
-                                    Wstaw wykryty
-                                </button>
-                            )}
+                            <button
+                                type="button"
+                                className="px-2 py-1 bg-slate-200 rounded hover:bg-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
+                                onClick={() => setFormData(prev => ({ ...prev, payment_date: previewData?.paymentDate }))}
+                                title={previewData?.paymentDate ? `Wykryto: ${previewData.paymentDate}` : 'Brak wykrytej wartości'}
+                                disabled={!previewData?.paymentDate}
+                            >
+                                Wstaw wykryty
+                            </button>
                         </div>
-                        {previewData?.paymentDate && (
-                            <p className="text-xs text-slate-600 mt-1">Wykryta data płatności: {previewData.paymentDate}</p>
-                        )}
+                        <p className="text-xs text-slate-600 mt-1">Wykryta data płatności: {previewData?.paymentDate || 'Nie wykryto'}</p>
                     </div>
 
                     {/* Waluta */}
@@ -717,6 +971,7 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                         )}
                     </div>
                 </div>
+                )}
 
                 {/* Pole uwagi i surowy tekst z możliwością dodawania linii */}
                 {showPreview && (
@@ -731,32 +986,14 @@ const UploadForm = ({ categories, onUploadSuccess }) => {
                             className="w-full rounded-md border border-slate-300 p-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
                             placeholder="Dodaj własne notatki lub wybierz linie poniżej, aby dodać do uwag."
                         />
-
-                        <div className="mt-4">
-                            <h4 className="text-sm font-semibold mb-2">Wykryty, surowy tekst (nieprzypisane wartości)</h4>
-                            <div className="max-h-48 overflow-auto border rounded">
-                                {rawText.length === 0 && (
-                                    <p className="text-xs text-slate-600 p-2">Brak surowych linii do wyświetlenia.</p>
-                                )}
-                                {rawText.map((line, idx) => (
-                                    <div key={idx} className="flex items-center justify-between px-2 py-1 border-b last:border-b-0">
-                                        <span className="text-xs text-slate-700 truncate mr-2" title={line}>{line}</span>
-                                        <button
-                                            type="button"
-                                            className="text-xs px-2 py-1 bg-slate-100 rounded hover:bg-slate-200"
-                                            onClick={() => setFormData(prev => ({ ...prev, notes: (prev.notes ? (prev.notes + '\n') : '') + line }))}
-                                        >
-                                            Dodaj do uwag
-                                        </button>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
                     </div>
                 )}
                 <div className="mt-4 flex gap-3 items-center">
                     <Button type="button" onClick={handlePreview} disabled={!file || status.type === 'info'} variant="secondary" size="md">
                         Podgląd wykrytych wartości
+                    </Button>
+                    <Button type="button" onClick={handleLoadResponseJson} disabled={status.type === 'info'} variant="secondary" size="md">
+                        Wczytaj z response.json
                     </Button>
                     <Button type="submit" disabled={!file || status.type === 'info'} variant="primary" size="lg" className="gap-2">
                         {status.type === 'info' ? (

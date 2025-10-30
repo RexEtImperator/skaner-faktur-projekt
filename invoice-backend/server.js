@@ -17,7 +17,6 @@ const { KsefError } = require('./utils/ksefErrorMapper');
 // Importy do przetwarzania faktur
 const pdf = require('pdf-parse');
 const Tesseract = require('tesseract.js');
-const { ImageAnnotatorClient } = require('@google-cloud/vision');
 const exceljs = require('exceljs');
 const PDFDocument = require('pdfkit');
 const mysqldump = require('mysqldump');
@@ -39,14 +38,7 @@ const dbConfig = {
     database: process.env.DB_NAME || 'invoice_parser'
 };
 
-// Inicjalizacja klienta Google Vision (jeśli jest skonfigurowany)
-let visionClient;
-try {
-    const keyFile = process.env.GOOGLE_APPLICATION_CREDENTIALS || 'gcp-credentials.json';
-    visionClient = new ImageAnnotatorClient({ keyFilename: keyFile });
-} catch (e) {
-    console.warn('Google Vision niedostępny. Ustaw GOOGLE_APPLICATION_CREDENTIALS w .env lub umieść gcp-credentials.json.');
-}
+// Usunięto integrację z Google Vision — używamy wyłącznie Tesseract
 
 // Middleware
 app.use(cors());
@@ -100,6 +92,7 @@ function parseText(text) {
         currency: null,
         sellerName: null,
         buyerName: null,
+        bdoNumber: null,
         dayMonthYear: null,
         mppRequired: false,
         vatBreakdown: []
@@ -118,7 +111,8 @@ function parseText(text) {
         amountInWords: /Słownie\s*[:\s]*(.+)/i,
         bankAccount: /Nr\s+rachunku\s*[:\s]*([A-Z]{2}[0-9A-Z ]{26,})/i,
         sellerName: /Sprzedawca\s*[:\s]*([\p{L}0-9\-., ]+)/iu,
-        buyerName: /Nabywca\s*[:\s]*([\p{L}0-9\-., ]+)/iu
+        buyerName: /Nabywca\s*[:\s]*([\p{L}0-9\-., ]+)/iu,
+        bdoNumber: /(?:Numer\s*BDO|BDO)\s*[:\s]*([0-9]{7,10})/i
     };
 
     for (const [key, regex] of Object.entries(patterns)) {
@@ -149,6 +143,35 @@ function parseText(text) {
         if (currencyMatch) data.currency = currencyMatch[1];
     }
 
+    // Dodatkowa detekcja: Data sprzedaży/dostawy (deliveryDate)
+    if (!data.deliveryDate) {
+        const deliveryMatch = text.match(/(?:Data\s+sprzedaży|Data\s+dostawy)\s*[:\s]*((?:\d{4}-\d{2}-\d{2})|(?:\d{2}[./-]\d{2}[./-]\d{4}))/i);
+        if (deliveryMatch && deliveryMatch[1]) {
+            data.deliveryDate = normalizeDateStr(deliveryMatch[1].trim());
+        }
+    }
+
+    // Fallback: numer faktury po frazie "FAKTURA VAT" bez wystąpienia "nr"
+    if (!data.invoiceNumber) {
+        const alt = text.match(/FAKTURA(?:\s+VAT)?[^\w]*([A-Za-z0-9\/\-]{5,})/i);
+        if (alt && alt[1]) {
+            data.invoiceNumber = alt[1].trim();
+        }
+    }
+
+    // Fallback: numer rachunku w formacie NRB (26 cyfr, bez prefiksu PL)
+    if (!data.bankAccount) {
+        const nrbMatch = text.match(/(?:nr\s*konta|konto|rachunek)[^\n]*?((?:\d[ \-]?){26})/i);
+        if (nrbMatch && nrbMatch[1]) {
+            const digits = nrbMatch[1].replace(/[^0-9]/g, '');
+            if (digits.length === 26) {
+                const candidate = `PL${digits}`;
+                const iban = normalizeAndValidateIBAN(candidate);
+                data.bankAccount = iban || candidate;
+            }
+        }
+    }
+
     // Obliczanie day_month_year
     if (data.issueDate) {
         const date = new Date(data.issueDate);
@@ -156,6 +179,63 @@ function parseText(text) {
         const mm = String(date.getMonth() + 1).padStart(2, '0');
         const yyyy = String(date.getFullYear());
         data.dayMonthYear = `${dd}/${mm}/${yyyy}`;
+    }
+
+    // Wyodrębnij bloki Sprzedawca/Nabywca wraz z adresem (bez NIP/BDO/banku)
+    try {
+        const linesAll = (text || '').split(/\r?\n/).map(l => l.trim());
+
+        const collectBlock = (startIdx) => {
+            if (startIdx === -1) return null;
+            const out = [];
+            for (let i = startIdx + 1; i < Math.min(linesAll.length, startIdx + 8); i++) {
+                const line = linesAll[i];
+                if (!line) break;
+                // Stop na polach NIP/BDO/bank/warunki/terminy/etykiety następnej sekcji
+                if (/^(NIP\b|Numer\s*BDO\b|nr\s*konta\b|konto\b|PKO\s*BANK\b|Santander\b|Warunek\b|termin\b|Data\b|Nabywca\b|Sprzedawca\b)/i.test(line)) break;
+                out.push(line);
+            }
+            const joined = out.join(' ').replace(/\s{2,}/g, ' ').trim();
+            return joined || null;
+        };
+
+        const idxSeller = linesAll.findIndex(l => /^Sprzedawca\b/i.test(l));
+        const idxBuyer = linesAll.findIndex(l => /^Nabywca\b/i.test(l));
+
+        const sellerBlock = collectBlock(idxSeller);
+        if (sellerBlock) {
+            // Sanitizacja: usuń przypadkowe wtrącenia NIP/BDO
+            data.sellerName = sellerBlock.replace(/\bNIP\b.*$/i, '').replace(/\bNumer\s*BDO\b.*$/i, '').trim();
+        }
+
+        const buyerBlock = collectBlock(idxBuyer);
+        if (buyerBlock) {
+            data.buyerName = buyerBlock.replace(/\bNIP\b.*$/i, '').trim();
+        }
+
+        // Szukaj NIP w liniach po blokach
+        if (!data.sellerNIP && idxSeller !== -1) {
+            for (let i = idxSeller + 1; i < Math.min(linesAll.length, idxSeller + 8); i++) {
+                const m = linesAll[i].match(/NIP\s*[:\s-]*([0-9]{10})/i);
+                if (m && m[1]) { data.sellerNIP = m[1]; break; }
+            }
+        }
+        if (!data.buyerNIP && idxBuyer !== -1) {
+            for (let i = idxBuyer + 1; i < Math.min(linesAll.length, idxBuyer + 8); i++) {
+                const m = linesAll[i].match(/NIP\s*[:\s-]*([0-9]{10})/i);
+                if (m && m[1]) { data.buyerNIP = m[1]; break; }
+            }
+        }
+
+        // Numer BDO (w pobliżu sprzedawcy)
+        if (!data.bdoNumber && idxSeller !== -1) {
+            for (let i = idxSeller + 1; i < Math.min(linesAll.length, idxSeller + 10); i++) {
+                const m = linesAll[i].match(/(?:Numer\s*BDO|BDO)\s*[:\s]*([0-9]{7,10})/i);
+                if (m && m[1]) { data.bdoNumber = m[1]; break; }
+            }
+        }
+    } catch (_) {
+        // ignoruj błędy ekstrakcji bloków
     }
 
     // Pozycje: opis, cena netto jedn., kwota VAT, kwota brutto, stawka VAT
@@ -173,6 +253,48 @@ function parseText(text) {
             total_vat_amount: parseFloat(match[3].replace(',', '.')),
             total_gross_amount: parseFloat(match[4].replace(',', '.'))
         });
+    }
+
+    // Bardziej precyzyjna detekcja dla układów tabel jak w przykładzie (Ilość JM rabat cena netto wart netto st VAT wart VAT wart brutto)
+    if (data.items.length === 0) {
+        const lines = (text || '').split(/\r?\n/);
+        const amountRow = /^\s*(\d+(?:[.,]\d{2})?)\s+([A-Z]{1,5})\s+(\d+(?:[.,]\d{2})?)\s+(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d{2}))\s+((?:\d+(?:[.,]\d{2})%|zw\.))\s+(\d+(?:[.,]\d{2}))\s+(\d+(?:[.,]\d{2}))\s*$/;
+        let descBuffer = [];
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].trim();
+            const m = line.match(amountRow);
+            if (m) {
+                const description = descBuffer.join(' ').trim();
+                const quantity = parseFloat(m[1].replace(',', '.'));
+                const unit = m[2];
+                const discount = parseFloat(m[3].replace(',', '.'));
+                const unitPriceNet = parseFloat(m[4].replace(',', '.'));
+                const totalNet = parseFloat(m[5].replace(',', '.'));
+                const vatRate = m[6].trim();
+                const totalVat = parseFloat(m[7].replace(',', '.'));
+                const totalGross = parseFloat(m[8].replace(',', '.'));
+                if (description) {
+                    data.items.push({
+                        description,
+                        quantity: Number.isFinite(quantity) ? quantity : 1,
+                        unit,
+                        catalog_number: null,
+                        unit_price_net: unitPriceNet,
+                        discount_percent: Number.isFinite(discount) ? discount : null,
+                        total_net_amount: totalNet,
+                        vat_rate: vatRate,
+                        total_vat_amount: totalVat,
+                        total_gross_amount: totalGross
+                    });
+                }
+                descBuffer = [];
+            } else {
+                // akumuluj opis pozycji (często kilka linii)
+                if (line && !/^\s*(Ilość|JM|rabat|cena\s+netto|wart\s+netto|VAT|brutto)/i.test(line)) {
+                    descBuffer.push(line);
+                }
+            }
+        }
     }
 
     // Sumowanie kwot z pozycji, jeśli zostały znalezione
@@ -202,6 +324,11 @@ function parseText(text) {
     if (data.sellerNIP && !validatePolishNIP(data.sellerNIP)) data.sellerNIP = null;
     if (data.buyerNIP && !validatePolishNIP(data.buyerNIP)) data.buyerNIP = null;
 
+    // Walidacja Numeru BDO: dozwolone 7-10 cyfr
+    if (data.bdoNumber && !/^\d{7,10}$/.test(data.bdoNumber)) {
+        data.bdoNumber = null;
+    }
+
     // Walidacja IBAN
     if (data.bankAccount) {
         const iban = normalizeAndValidateIBAN(data.bankAccount);
@@ -210,6 +337,33 @@ function parseText(text) {
 
     // Detekcja MPP
     data.mppRequired = detectSplitPaymentRequired(data.totalGrossAmount, text);
+
+    // Fallback heurystyki dla NIP i nazw, gdy brak wyraźnych etykiet w dokumencie
+    try {
+        const lines = (text || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        // Znajdź wszystkie potencjalne NIP (10 cyfr) w tekście
+        const nipMatches = Array.from(text.matchAll(/\b(\d{10})\b/g)).map(m => m[1]).filter(validatePolishNIP);
+        if (!data.sellerNIP && nipMatches.length > 0) data.sellerNIP = nipMatches[0];
+        if (!data.buyerNIP && nipMatches.length > 1) data.buyerNIP = nipMatches[1];
+
+        // Na podstawie linii z NIP spróbuj uchwycić nazwę powyżej
+        const findNameNear = (nip) => {
+            if (!nip) return null;
+            const idx = lines.findIndex(l => l.includes(nip));
+            if (idx > 0) {
+                // weź pierwszą niepustą linię powyżej
+                for (let i = idx - 1; i >= Math.max(0, idx - 3); i--) {
+                    const candidate = lines[i].replace(/^\s*[:\-]+\s*/, '').trim();
+                    if (candidate && candidate.length >= 3) return candidate;
+                }
+            }
+            return null;
+        };
+        if (!data.sellerName) data.sellerName = findNameNear(data.sellerNIP) || data.sellerName;
+        if (!data.buyerName) data.buyerName = findNameNear(data.buyerNIP) || data.buyerName;
+    } catch (_) {
+        // ignoruj błędy heurystyk
+    }
 
     return data;
 }
@@ -333,7 +487,7 @@ app.delete('/api/categories/:id', verifyToken, async (req, res) => {
 // --- Zarządzanie Ustawieniami i Certyfikatami ---
 app.get('/api/settings', verifyToken, async (req, res) => {
     const connection = await mysql.createConnection(dbConfig);
-    const [rows] = await connection.execute('SELECT email, ocr_engine, imap_settings FROM users WHERE id = ?', [req.userId]);
+    const [rows] = await connection.execute('SELECT email, imap_settings, ksef_nip FROM users WHERE id = ?', [req.userId]);
     await connection.end();
     if (rows.length > 0) {
         // Nigdy nie wysyłaj hasła IMAP do frontendu!
@@ -348,7 +502,7 @@ app.get('/api/settings', verifyToken, async (req, res) => {
 });
 
 app.put('/api/settings', verifyToken, async (req, res) => {
-    const { ocr_engine, imap_settings, ksef_nip, ksef_token } = req.body;
+    const { imap_settings, ksef_nip, ksef_token } = req.body;
     
     try {
         const connection = await mysql.createConnection(dbConfig);
@@ -369,8 +523,8 @@ app.put('/api/settings', verifyToken, async (req, res) => {
         }
         
         await connection.execute(
-            'UPDATE users SET ocr_engine = ?, imap_settings = ?, ksef_nip = ?, ksef_token_encrypted = ? WHERE id = ?',
-            [ocr_engine, JSON.stringify(newImapSettings), ksef_nip, newKsefToken, req.userId]
+            'UPDATE users SET imap_settings = ?, ksef_nip = ?, ksef_token_encrypted = ? WHERE id = ?',
+            [JSON.stringify(newImapSettings), ksef_nip, newKsefToken, req.userId]
         );
         await connection.end();
         res.json({ message: 'Ustawienia zaktualizowane.' });
@@ -409,17 +563,25 @@ app.post('/api/upload', verifyToken, invoiceUpload.single('invoice'), async (req
 
     try {
         const connection = await mysql.createConnection(dbConfig);
-        const [userRows] = await connection.execute('SELECT ocr_engine FROM users WHERE id = ?', [req.userId]);
-        const ocrEngine = userRows[0]?.ocr_engine || 'tesseract';
         let text = '';
+        let ocrWords = [];
+        let imageSize = null;
 
         if (req.file.mimetype.startsWith('image/')) {
-            if (ocrEngine === 'google_vision' && visionClient) {
-                const [result] = await visionClient.textDetection(req.file.buffer);
-                text = result.fullTextAnnotation?.text || '';
-            } else {
-                const result = await Tesseract.recognize(req.file.buffer, 'pol');
-                text = result.data.text;
+            const result = await Tesseract.recognize(req.file.buffer, 'pol');
+            text = result.data.text;
+            // Zbierz słowa z bbox dla podglądu
+            if (Array.isArray(result.data.words)) {
+                ocrWords = result.data.words.map(w => ({
+                    text: w.text || '',
+                    bbox: w.bbox || w.boundingBox || w.box || null
+                })).filter(w => w.bbox);
+            }
+            if (result.data.imageSize) {
+                imageSize = {
+                    width: result.data.imageSize.width,
+                    height: result.data.imageSize.height
+                };
             }
         } else if (req.file.mimetype === 'application/pdf') {
             const data = await pdf(req.file.buffer);
@@ -442,7 +604,7 @@ app.post('/api/upload', verifyToken, invoiceUpload.single('invoice'), async (req
             totalGrossAmount: req.body.total_gross_amount,
             currency: req.body.currency,
             paymentMethod: req.body.payment_method,
-            bankAccount: req.body.bank_account,
+            bankAccount: (req.body.seller_bank_account || req.body.bank_account),
             paymentDate: req.body.payment_date
         };
         Object.entries(overrides).forEach(([key, val]) => {
@@ -451,10 +613,47 @@ app.post('/api/upload', verifyToken, invoiceUpload.single('invoice'), async (req
             }
         });
 
-        // Tryb podglądu: zwróć wykryte dane i surowy tekst bez zapisu
+        // Tryb podglądu: zwróć wykryte dane i surowy tekst + bbox słów (bez zapisu)
         if (req.body.preview === 'true') {
+            // Znormalizuj bbox względem rozmiaru obrazu, jeśli dostępny.
+            // Gdy rozmiar obrazu nie jest dostępny, zwróć surowe wartości w pikselach (klient je przeliczy).
+            let normalizedWords = [];
+            if (ocrWords.length > 0) {
+                normalizedWords = ocrWords.map(({ text: t, bbox: b }) => {
+                    const x0 = b.x0 ?? b.left ?? b.x ?? (b.vertices?.[0]?.x ?? 0);
+                    const y0 = b.y0 ?? b.top ?? b.y ?? (b.vertices?.[0]?.y ?? 0);
+                    const x1 = b.x1 ?? b.right ?? (b.vertices?.[2]?.x ?? (x0 + (b.width ?? 0)));
+                    const y1 = b.y1 ?? b.bottom ?? (b.vertices?.[2]?.y ?? (y0 + (b.height ?? 0)));
+                    const w = Math.max(1, x1 - x0);
+                    const h = Math.max(1, y1 - y0);
+                    if (imageSize) {
+                        return {
+                            text: t,
+                            bbox: {
+                                x: x0 / imageSize.width,
+                                y: y0 / imageSize.height,
+                                w: w / imageSize.width,
+                                h: h / imageSize.height
+                            }
+                        };
+                    }
+                    return {
+                        text: t,
+                        bbox: { x: x0, y: y0, w, h }
+                    };
+                });
+            }
             await connection.end();
-            return res.status(200).json({ preview: true, data: invoiceData, rawText: (text || '').split(/\r?\n/) });
+            return res.status(200).json({
+                preview: true,
+                message: 'Podgląd wygenerowany',
+                data: invoiceData,
+                rawText: (text || '').split(/\r?\n/),
+                ocr: {
+                    words: normalizedWords,
+                    imageSize
+                }
+            });
         }
         const isFallback = (!invoiceData.invoiceNumber || !invoiceData.totalGrossAmount);
         if (isFallback) {
@@ -467,11 +666,11 @@ app.post('/api/upload', verifyToken, invoiceUpload.single('invoice'), async (req
         // Rozpocznij transakcję
         await connection.beginTransaction();
 
-        const invoiceSql = 'INSERT INTO invoices (user_id, invoice_number, issue_date, delivery_date, seller_nip, buyer_nip, seller_name, buyer_name, total_net_amount, total_vat_amount, total_gross_amount, currency, day_month_year, payment_method, bank_account, payment_date, payment_status, payment_due_date, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+        const invoiceSql = 'INSERT INTO invoices (user_id, invoice_number, issue_date, delivery_date, seller_nip, buyer_nip, seller_name, buyer_name, total_net_amount, total_vat_amount, total_gross_amount, currency, day_month_year, payment_method, seller_bank_account, payment_date, payment_status, payment_due_date, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
         const [invoiceResult] = await connection.execute(invoiceSql, [
             req.userId,
             invoiceData.invoiceNumber,
-            invoiceData.issueDate,
+            invoiceData.issueDate || null,
             null,
             invoiceData.sellerNIP || null,
             invoiceData.buyerNIP || null,
@@ -666,7 +865,7 @@ app.put('/api/invoices/:id', verifyToken, async (req, res) => {
             UPDATE invoices 
             SET invoice_number = ?, issue_date = ?, delivery_date = ?, seller_nip = ?, buyer_nip = ?,
                 seller_name = ?, buyer_name = ?, total_net_amount = ?, total_vat_amount = ?, total_gross_amount = ?,
-                currency = ?, day_month_year = ?, payment_method = ?, bank_account = ?, payment_date = ?,
+                currency = ?, day_month_year = ?, payment_method = ?, seller_bank_account = ?, payment_date = ?,
                 payment_status = ?, payment_due_date = ?
             WHERE id = ? AND user_id = ?
         `;
@@ -684,7 +883,7 @@ app.put('/api/invoices/:id', verifyToken, async (req, res) => {
             currency || 'PLN',
             day_month_year,
             payment_method || null,
-            bank_account || null,
+            (req.body.seller_bank_account || bank_account || null),
             payment_date || null,
             req.body.payment_status || null,
             req.body.payment_due_date || null,
@@ -746,7 +945,7 @@ app.get('/api/search', verifyToken, async (req, res) => {
                 i.buyer_name LIKE ? OR 
                 i.currency LIKE ? OR 
                 i.payment_method LIKE ? OR 
-                i.bank_account LIKE ?
+                i.seller_bank_account LIKE ?
             )
             ORDER BY issue_date DESC
         `;
@@ -789,7 +988,7 @@ app.get('/api/export', verifyToken, async (req, res) => {
         // Krok 2: Połączenie z bazą danych i pobranie odpowiednich danych.
         connection = await mysql.createConnection(dbConfig);
         const sql = `
-            SELECT i.invoice_number, i.issue_date, i.delivery_date, i.seller_nip, i.buyer_nip, i.seller_name, i.buyer_name, i.currency, i.payment_method, i.bank_account, i.total_net_amount, i.total_vat_amount, i.total_gross_amount, c.name AS category_name
+            SELECT i.invoice_number, i.issue_date, i.delivery_date, i.seller_nip, i.buyer_nip, i.seller_name, i.buyer_name, i.currency, i.payment_method, i.seller_bank_account AS bank_account, i.total_net_amount, i.total_vat_amount, i.total_gross_amount, c.name AS category_name
             FROM invoices i
             LEFT JOIN categories c ON i.category_id = c.id
             WHERE i.user_id = ? AND i.day_month_year = ?
@@ -1233,7 +1432,7 @@ app.post('/api/invoices', verifyToken, async (req, res) => {
             INSERT INTO invoices (
                 user_id, invoice_number, issue_date, delivery_date, seller_nip, buyer_nip, seller_name, buyer_name,
                 total_net_amount, total_vat_amount, total_gross_amount, currency, day_month_year, payment_method,
-                bank_account, payment_date, payment_status, payment_due_date, notes
+                seller_bank_account, payment_date, payment_status, payment_due_date, notes
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `;
         const [result] = await connection.execute(sql, [
@@ -1251,7 +1450,7 @@ app.post('/api/invoices', verifyToken, async (req, res) => {
             currency || 'PLN',
             day_month_year,
             payment_method || null,
-            bank_account || null,
+            (req.body.seller_bank_account || bank_account || null),
             payment_date || null,
             payment_status || null,
             payment_due_date || null,

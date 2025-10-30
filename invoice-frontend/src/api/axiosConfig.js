@@ -1,14 +1,9 @@
 import axios from 'axios';
 
-// 1. Stworzenie skonfigurowanej instancji Axios.
-//    Wszystkie zapytania wysyłane przez 'api' będą domyślnie kierowane
-//    na adres 'http://localhost:3000/api'.
 const api = axios.create({
     baseURL: import.meta.env?.VITE_API_URL || 'http://localhost:3000/api',
 });
 
-// 2. Konfiguracja "interceptora" dla zapytań wychodzących.
-//    Ta funkcja jest wywoływana PRZED wysłaniem każdego zapytania.
 api.interceptors.request.use(
     (config) => {
         // Pobierz token autoryzacyjny z localStorage.

@@ -1,4 +1,3 @@
--- Skrypt do utworzenia bazy danych i użytkownika
 CREATE DATABASE IF NOT EXISTS invoice_parser CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 USE invoice_parser;
@@ -14,7 +13,6 @@ USE invoice_parser;
    `id` int NOT NULL AUTO_INCREMENT,
    `email` varchar(255) NOT NULL,
    `password_hash` varchar(255) NOT NULL,
-   `ocr_engine` varchar(50) DEFAULT 'tesseract',
    `imap_settings` text,
    `ksef_nip` varchar(20) DEFAULT NULL,
    `ksef_token_encrypted` text,
@@ -69,6 +67,16 @@ USE invoice_parser;
    PRIMARY KEY (`id`),
    KEY `user_id` (`user_id`),
    KEY `category_id` (`category_id`),
+   KEY `invoice_number_idx` (`invoice_number`),
+   KEY `seller_nip_idx` (`seller_nip`),
+   KEY `buyer_nip_idx` (`buyer_nip`),
+   KEY `seller_name_idx` (`seller_name`),
+   KEY `buyer_name_idx` (`buyer_name`),
+   KEY `currency_idx` (`currency`),
+   KEY `payment_method_idx` (`payment_method`),
+   KEY `payment_status_idx` (`payment_status`),
+   KEY `day_month_year_idx` (`day_month_year`),
+   KEY `seller_bank_account_idx` (`seller_bank_account`),
    CONSTRAINT `invoices_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE,
    CONSTRAINT `invoices_ibfk_2` FOREIGN KEY (`category_id`) REFERENCES `categories` (`id`) ON DELETE SET NULL
  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -87,6 +95,7 @@ USE invoice_parser;
      `total_vat_amount` DECIMAL(10, 2) NOT NULL,
      `total_gross_amount` DECIMAL(10, 2) NOT NULL,
      PRIMARY KEY (`id`),
+     KEY `invoice_id_idx` (`invoice_id`),
      FOREIGN KEY (`invoice_id`) REFERENCES `invoices`(`id`) ON DELETE CASCADE
  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
@@ -99,5 +108,6 @@ USE invoice_parser;
    `vat_amount` DECIMAL(10,2) NOT NULL,
    `gross_amount` DECIMAL(10,2) NOT NULL,
    PRIMARY KEY (`id`),
+   KEY `invoice_id_idx` (`invoice_id`),
    FOREIGN KEY (`invoice_id`) REFERENCES `invoices`(`id`) ON DELETE CASCADE
  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

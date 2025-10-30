@@ -78,7 +78,7 @@ async function main() {
     console.log('Uruchamianie workera IMAP...');
     const connection = await mysql.createConnection(dbConfig);
     try {
-        const [users] = await connection.execute('SELECT id, ocr_engine, imap_settings FROM users');
+        const [users] = await connection.execute('SELECT id, imap_settings FROM users');
         for (const user of users.filter(u => u.imap_settings)) {
             await checkUserMailbox(user, connection);
         }

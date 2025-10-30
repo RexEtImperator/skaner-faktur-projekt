@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
-import { HomeIcon, ChevronDownIcon, ChartBarIcon, WrenchScrewdriverIcon, BuildingOffice2Icon, ArrowRightOnRectangleIcon } from '@heroicons/react/24/outline';
+import { HomeIcon, ChevronDownIcon, ChartBarIcon, WrenchScrewdriverIcon, BuildingOffice2Icon, ArrowRightOnRectangleIcon, DocumentMagnifyingGlassIcon } from '@heroicons/react/24/outline';
 import Button from '../ui/Button';
 
 /**

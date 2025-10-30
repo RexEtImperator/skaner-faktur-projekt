@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import api from '../../api/axiosConfig';
 import Button from '../ui/Button';
+import { TrashIcon } from '@heroicons/react/24/solid';
 
 const Categories = () => {
     const [categories, setCategories] = useState([]);
@@ -72,7 +73,9 @@ const Categories = () => {
                         {categories.map((cat) => (
                             <li key={cat.id} className="flex justify-between items-center py-1.5 border-b border-slate-200">
                                 <span>{cat.name}</span>
-                                <Button title="Usuń" onClick={() => handleDelete(cat.id)} variant="outline" size="sm">Usuń</Button>
+                                <Button title="Usuń" aria-label="Usuń" onClick={() => handleDelete(cat.id)} variant="danger" size="sm">
+                                    <TrashIcon className="w-4 h-4" aria-hidden="true" />
+                                </Button>
                             </li>
                         ))}
                     </ul>

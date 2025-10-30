@@ -17,9 +17,12 @@ const SearchBar = ({ onSearch, onClear }) => {
     }
 
     return (
-        <form onSubmit={handleSearch} className="flex gap-2 items-center mb-4">
+        <form onSubmit={handleSearch} className="flex gap-2 items-center mb-4" role="search">
+            <label htmlFor="invoiceSearch" className="sr-only">Wyszukaj fakturę lub NIP</label>
             <input
                 type="text"
+                id="invoiceSearch"
+                name="invoiceSearch"
                 placeholder="Szukaj po numerze faktury lub NIP..."
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}

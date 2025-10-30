@@ -35,7 +35,7 @@ Opis funkcjonalności:
   - Rejestracja/logowanie, tokeny JWT, przechowywanie w `localStorage` (frontend) i middleware sprawdzające token (backend).
   - Ochrona tras na froncie przez `ProtectedRoute`/`PublicRoute`.
 - Ustawienia
-  - Wybór silnika OCR, konfiguracja IMAP/KSeF, zarządzanie kluczami/certyfikatami.
+  - Konfiguracja IMAP/KSeF, zarządzanie kluczami/certyfikatami.
   
 Statusy:
 - Backend: `http://localhost:3000` (`GET /api/health` zwraca `{"status":"ok"}`)
@@ -54,7 +54,7 @@ Uruchomienie w 5 krokach:
    - `DB_NAME=invoice_parser`
    - `JWT_SECRET=<losowy_hex_32B>`
    - `ENCRYPTION_KEY=<losowy_hex_64B>`
-   - (opcjonalnie) `GOOGLE_APPLICATION_CREDENTIALS=./gcp-credentials.json`
+   
 
 2) Frontend `.env` w `invoice-frontend/.env`
    - `REACT_APP_API_URL=http://localhost:3000`
@@ -74,7 +74,7 @@ Uruchomienie w 5 krokach:
 
 Funkcje kluczowe:
 - Import z KSeF (usługi w `invoice-backend/services/ksefService.js`)
-- OCR: Tesseract oraz (opcjonalnie) Google Vision
+- OCR: Tesseract
 - Worker IMAP: `invoice-backend/imap-worker.js`
 - Eksport do Excel i raporty PDF
 - Kopia bazy danych
